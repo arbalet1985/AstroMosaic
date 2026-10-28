@@ -22,7 +22,7 @@ func TestShot(t *testing.T) {
 	if path == "" {
 		t.Skip("set SHOT")
 	}
-	sz := image.Pt(1600, 200)
+	sz := image.Pt(1600, 420)
 	w, err := headless.NewWindow(sz.X, sz.Y)
 	if err != nil {
 		t.Skip(err)
@@ -32,6 +32,9 @@ func TestShot(t *testing.T) {
 	th.TextSize = 14
 	u := &ui{th: th, rows: 2, cols: 2, tiles: map[cell]*tileState{}, points: map[cellPair][]PointPair{}, pairBtns: map[cellPair]*widget.Clickable{}}
 	u.link.Value, u.lfit.Value, u.bgEq.Value = true, true, true
+	if os.Getenv("SHOTGRID") != "" {
+		u.grid.open, u.grid.hr, u.grid.hc = true, 3, 4
+	}
 	var ops op.Ops
 	gtx := layout.Context{Ops: &ops, Constraints: layout.Exact(sz), Metric: unit.Metric{PxPerDp: 1, PxPerSp: 1}}
 	u.layout(gtx)

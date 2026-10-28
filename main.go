@@ -95,8 +95,9 @@ type ui struct {
 	expl  *explorer.Explorer
 	tasks chan func()
 
-	rowsEd, colsEd, overlapEd  widget.Editor
-	applyGrid, stitchBtn       widget.Clickable
+	overlapEd                  widget.Editor
+	stitchBtn, gridBtn         widget.Clickable
+	grid                       gridPicker // Word-style rows × cols chooser under gridBtn
 	saveBtn, clearPts          widget.Clickable
 	viewGrid, viewPts, viewRes widget.Clickable
 	openAll, moreBtn, weakBtn  widget.Clickable
@@ -149,11 +150,9 @@ func main() {
 		u := &ui{w: w, th: th, expl: explorer.NewExplorer(w), tasks: make(chan func(), 64),
 			rows: 2, cols: 2, tiles: map[cell]*tileState{}, points: map[cellPair][]PointPair{},
 			pairBtns: map[cellPair]*widget.Clickable{}, status: "Нажмите «Открыть плитки…» и выберите все плитки сразу"}
-		for _, e := range []*widget.Editor{&u.rowsEd, &u.colsEd, &u.overlapEd, &u.angleEd} {
+		for _, e := range []*widget.Editor{&u.overlapEd, &u.angleEd} {
 			e.SingleLine = true
 		}
-		u.rowsEd.SetText("2")
-		u.colsEd.SetText("2")
 		u.overlapEd.SetText("15")
 		u.angleEd.SetText("0")
 		u.link.Value, u.clamp.Value, u.it = true, true, interpLanczos4
@@ -207,13 +206,34 @@ func (u *ui) layout(gtx layout.Context) {
 			return u.geomBar(gtx)
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			switch u.view {
-			case 1:
-				return u.pointsView(gtx)
-			case 2:
-				return u.resultView(gtx)
+			view := func(gtx layout.Context) layout.Dimensions {
+				switch u.view {
+				case 1:
+					return u.pointsView(gtx)
+				case 2:
+					return u.resultView(gtx)
+				}
+				return u.gridView(gtx)
 			}
-			return u.gridView(gtx)
+			if !u.grid.open {
+				return view(gtx)
+			}
+			return layout.Stack{Alignment: layout.NW}.Layout(gtx,
+				layout.Expanded(view),
+				layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+					defer clip.Rect{Max: gtx.Constraints.Min}.Push(gtx.Ops).Pop()
+					event.Op(gtx.Ops, &u.grid.open)
+					return layout.Dimensions{Size: gtx.Constraints.Min}
+				}),
+				layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						d, r, c, ok := u.grid.Layout(gtx, u.th, u.rows, u.cols)
+						if ok {
+							u.setGrid(r, c)
+						}
+						return d
+					})
+				}))
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.UniformInset(unit.Dp(6)).Layout(gtx, material.Body2(u.th, u.status).Layout)
@@ -222,19 +242,16 @@ func (u *ui) layout(gtx layout.Context) {
 }
 
 func (u *ui) handle(gtx layout.Context) {
-	if u.applyGrid.Clicked(gtx) {
-		r, _ := strconv.Atoi(strings.TrimSpace(u.rowsEd.Text()))
-		c, _ := strconv.Atoi(strings.TrimSpace(u.colsEd.Text()))
-		if r < 1 || c < 1 || r*c > 100 {
-			u.status = "Строк и столбцов должно быть от 1, всего плиток не больше 100"
-		} else {
-			u.rows, u.cols = r, c
-			for k := range u.tiles {
-				if k[0] >= r || k[1] >= c {
-					delete(u.tiles, k)
-				}
-			}
-			u.cur = nil
+	if u.gridBtn.Clicked(gtx) {
+		u.grid.open = !u.grid.open
+	}
+	for { // a press outside the open picker closes it
+		ev, ok := gtx.Event(pointer.Filter{Target: &u.grid.open, Kinds: pointer.Press})
+		if !ok {
+			break
+		}
+		if _, ok := ev.(pointer.Event); ok {
+			u.grid.open = false
 		}
 	}
 	if ch := u.lfit.Update(gtx); (u.bgEq.Update(gtx) || ch) && u.result != nil && !u.busy {
@@ -400,8 +417,6 @@ func (u *ui) openMany() {
 		u.post(func() {
 			u.busy = false
 			u.rows, u.cols = rows, cols
-			u.rowsEd.SetText(strconv.Itoa(rows))
-			u.colsEd.SetText(strconv.Itoa(cols))
 			u.tiles, u.points, u.weak, u.cur = map[cell]*tileState{}, map[cellPair][]PointPair{}, nil, nil
 			wcs := 0
 			for i, k := range cells {
@@ -575,6 +590,7 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 		resTab = "Результат (нет)"
 	}
 	row1 := []layout.FlexChild{
+		btn(&u.gridBtn, fmt.Sprintf("Сетка %d × %d ▾", u.rows, u.cols)), sp, sp,
 		layout.Rigid(material.Body1(th, "Вид:").Layout), sp,
 		tab(&u.viewGrid, "Плитки", u.view != 2), tab(&u.viewRes, resTab, u.view == 2), sp, sp,
 		btn(&u.openAll, "Открыть плитки…"), sp,
@@ -629,10 +645,6 @@ func (u *ui) moreBar(gtx layout.Context) layout.Dimensions {
 	sp := layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout)
 	return layout.Inset{Left: unit.Dp(6), Right: unit.Dp(6), Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-			layout.Rigid(material.Body2(th, "Сетка вручную: ").Layout),
-			ed(&u.rowsEd, "строк "), sp, ed(&u.colsEd, "столбцов "), sp,
-			layout.Rigid(material.Button(th, &u.applyGrid, "Применить").Layout), sp,
-			layout.Rigid(material.Body2(th, "(клик по ячейке — заменить плитку)").Layout), sp, sp,
 			ed(&u.overlapEd, "Оставить перекрытие % "), sp, sp,
 			layout.Rigid(material.Button(th, &u.viewPts, "Ручные точки").Layout),
 		)
@@ -1243,4 +1255,21 @@ func checkBox(th *material.Theme, b *widget.Bool, label string) material.CheckBo
 	c := material.CheckBox(th, b, label)
 	c.IconColor = color.NRGBA{R: 0x6c, G: 0xb4, B: 0xff, A: 0xff}
 	return c
+}
+
+// setGrid resizes the tile grid; tiles that fall outside it are dropped.
+func (u *ui) setGrid(r, c int) {
+	u.rows, u.cols = r, c
+	for k := range u.tiles {
+		if k[0] >= r || k[1] >= c {
+			delete(u.tiles, k)
+		}
+	}
+	for p := range u.points {
+		if p.A[0] >= r || p.A[1] >= c || p.B[0] >= r || p.B[1] >= c {
+			delete(u.points, p)
+		}
+	}
+	u.cur, u.weak, u.view = nil, nil, 0
+	u.status = fmt.Sprintf("Сетка %d × %d. Щёлкните по ячейке, чтобы открыть или заменить плитку", r, c)
 }
