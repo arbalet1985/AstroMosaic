@@ -640,7 +640,8 @@ func mtf(x, m, lo, hi float64) float64 {
 	return (m - 1) * x / den
 }
 
-// stretchParams returns Siril autostretch shadows and midtones per channel. Linked uses the
+// stretchParams returns Siril autostretch shadows and midtones per channel (Siril's
+// find_[un]linked_midtones_balance: shadows at median − 2.8·MADN, background mapped to 0.25). Linked uses the
 // channel means for all channels (keeps colour balance); unlinked neutralises each channel.
 func stretchParams(m *Img, linked bool) (c0, mid []float64) {
 	n := m.W * m.H
@@ -649,7 +650,12 @@ func stretchParams(m *Img, linked bool) (c0, mid []float64) {
 	for c := 0; c < m.C; c++ {
 		s := make([]float64, 0, n/stride+1)
 		for i := 0; i < n; i += stride {
-			s = append(s, float64(m.Pix[c*n+i]))
+			if v := m.Pix[c*n+i]; v != 0 { // as Siril: zero pixels (empty mosaic corners) are not data
+				s = append(s, float64(v))
+			}
+		}
+		if len(s) == 0 {
+			s = append(s, 0)
 		}
 		med := median(s)
 		for i := range s {

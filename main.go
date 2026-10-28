@@ -643,7 +643,14 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 	if u.more {
 		more = "Дополнительно ▲"
 	}
-	children := []layout.FlexChild{
+	// row 1: which view, then the stitching steps in order; row 2: display and saving
+	resTab := "Результат"
+	if u.result == nil {
+		resTab = "Результат (нет)"
+	}
+	row1 := []layout.FlexChild{
+		layout.Rigid(material.Body1(th, "Вид:").Layout), sp,
+		tab(&u.viewGrid, "Плитки", u.view != 2), tab(&u.viewRes, resTab, u.view == 2), sp, sp,
 		btn(&u.openAll, "Открыть плитки…"), sp,
 		btn(&u.clearAll, "Очистить плитки"), sp,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -662,22 +669,30 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 			}
 			return b.Layout(gtx)
 		}), sp,
-		btn(&u.stitchBtn, "Склеить"), sp,
-		tab(&u.viewGrid, "Плитки", u.view == 0), tab(&u.viewRes, "Результат", u.view == 2), sp,
-		layout.Rigid(material.CheckBox(th, &u.stretch, "Авторастяжение").Layout),
+		btn(&u.stitchBtn, "Склеить"),
+	}
+	row2 := []layout.FlexChild{
+		layout.Rigid(material.CheckBox(th, &u.stretch, "Авторастяжение (как Siril, только просмотр)").Layout),
 		layout.Rigid(material.CheckBox(th, &u.link, "Связать каналы").Layout), sp,
 		btn(&u.fmtBtn, "Формат: "+saveFormats[u.format].label), sp, btn(&u.saveBtn, "Сохранить…"), sp,
 		btn(&u.moreBtn, more),
 	}
 	if len(u.weak) > 0 {
-		children = append(children, sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		row2 = append(row2, sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			b := material.Button(th, &u.weakBtn, fmt.Sprintf("Проверить пары (%d)", len(u.weak)))
 			b.Background = color.NRGBA{R: 0xc0, G: 0x60, B: 0x20, A: 0xff}
 			return b.Layout(gtx)
 		}))
 	}
+	row := func(ch []layout.FlexChild) layout.FlexChild {
+		return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(3), Bottom: unit.Dp(3)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx, ch...)
+			})
+		})
+	}
 	return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Alignment: layout.Middle}.Layout(gtx, children...)
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(row1), row(row2))
 	})
 }
 

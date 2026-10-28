@@ -4,23 +4,30 @@ import (
 	"math"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// autoGrid puts images into grid cells: by sky position when all have WCS, else by an "R-C" / "R_C"
-// suffix in the file or folder name (as ASIAIR names mosaic panels), else by stars shared in the
-// overlaps, else row-major in the given order.
+// autoGrid puts images into grid cells: by sky position when all have WCS, else by stars shared in
+// the overlaps, else by an "R-C" / "R_C" suffix in the file or folder name (as ASIAIR names mosaic
+// panels), else row-major in the given order.
 func autoGrid(imgs []*Img, paths []string) (cells []cell, rows, cols int, how string) {
 	if c, ok := gridByWCS(imgs); ok {
 		return finish(c, "по WCS")
 	}
+	// the sky beats file names: panel numbering differs between programs (row-col or col-row,
+	// counted from the top or the bottom)
+	if c, ok := gridByStars(imgs); ok {
+		how := "по звёздам в перекрытиях"
+		if cn, ok := gridByName(paths); ok && !slices.Equal(cn, c) {
+			how += " (номера в именах файлов не совпадают с небом — не учтены)"
+		}
+		return finish(c, how)
+	}
 	if c, ok := gridByName(paths); ok {
 		return finish(c, "по именам файлов")
-	}
-	if c, ok := gridByStars(imgs); ok {
-		return finish(c, "по звёздам в перекрытиях")
 	}
 	n := len(imgs)
 	cols = max(1, int(math.Ceil(math.Sqrt(float64(n)))))

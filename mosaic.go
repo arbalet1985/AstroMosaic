@@ -444,13 +444,24 @@ func place(tiles []*Tile, points map[pairKey][]PointPair, overlap float64) ([]Wa
 	for i := range E {
 		E[i] = make([]e, n)
 	}
-	for a := 0; a < n; a++ {
-		for b := a + 1; b < n; b++ {
+	wg.Wait()
+	parallel(n*n, func(lo, hi int) {
+		for k := lo; k < hi; k++ {
+			a, b := k/n, k%n
+			if a >= b {
+				continue
+			}
 			t, c, how := edge(tiles[a], tiles[b], points[pairKey{a, b}], overlap)
+			// no points or WCS: look for the overlap by stars instead of trusting the grid guess
+			if how == "сетка" && (n <= 25 || c <= 200) {
+				if ts, cnt, ok := findOverlap(stars[a], stars[b], tiles[a].Img, tiles[b].Img); ok {
+					t, c, how = ts, 50+c/100-float64(cnt)/1e4, "звёзды"
+				}
+			}
 			E[a][b] = e{t, c, how}       // b -> a
 			E[b][a] = e{t.inv(), c, how} // a -> b
 		}
-	}
+	})
 	A := make([]Aff, n)
 	placed := make([]bool, n)
 	order := []int{0}
@@ -473,14 +484,13 @@ func place(tiles []*Tile, points map[pairKey][]PointPair, overlap float64) ([]Wa
 		order = append(order, bv)
 		links = append(links, link{bu, bv})
 	}
-	wg.Wait()
 
 	var ms []match
 	count := map[pairKey]int{}
 	for a := 0; a < n; a++ {
 		for b := a + 1; b < n; b++ {
 			ta, tb := tiles[a], tiles[b]
-			radius := map[string]float64{"точки": 20, "WCS": 60}[E[a][b].how]
+			radius := map[string]float64{"точки": 20, "WCS": 60, "звёзды": 20}[E[a][b].how]
 			if radius == 0 {
 				radius = 0.15 * float64(max(tb.Img.W, tb.Img.H))
 			}
@@ -723,15 +733,17 @@ func lowpass(m *Img) *Img {
 	return out
 }
 
-// background is a starless lowpass: pixels are clamped to ±2σ of the current estimate and blurred
-// again. A plain lowpass keeps blurred stars, so detail = image − lowpass carries a dark ring around
-// each star; where two tiles' stars differ (seeing, saturation) the averaged low band no longer
-// fills that ring in and it shows as a black halo.
+// background is a starless lowpass: pixels above the current estimate + 2σ are cut down to it and
+// the result blurred again, until the stars have melted away. A plain lowpass keeps blurred stars, so
+// detail = image − lowpass carries a dark ring around each star; where two tiles' stars differ
+// (seeing, saturation) the averaged low band no longer fills that ring in and it shows as a black
+// halo. Only the top is cut: lifting the dark sky around a star up to the blurred star as well would
+// keep the star in the estimate and widen it with every pass.
 func background(m *Img) *Img {
 	low := lowpass(m)
 	n := m.W * m.H
 	cl := newImg(m.W, m.H, m.C)
-	for it := 0; it < 3; it++ {
+	for it := 0; it < 5; it++ {
 		for c := 0; c < m.C; c++ {
 			src, bg, dst := m.Pix[c*n:(c+1)*n], low.Pix[c*n:(c+1)*n], cl.Pix[c*n:(c+1)*n]
 			var d []float64
@@ -740,7 +752,7 @@ func background(m *Img) *Img {
 			}
 			k := float32(2 * 1.4826 * median(d))
 			for i, v := range src {
-				dst[i] = min(max(v, bg[i]-k), bg[i]+k)
+				dst[i] = min(v, bg[i]+k)
 			}
 		}
 		low = lowpass(cl)
