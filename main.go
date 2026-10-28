@@ -37,7 +37,6 @@ type cellPair struct{ A, B cell } // A is left of / above B
 type tileState struct {
 	path    string
 	img     *Img
-	orig    *Img                 // the loaded image while img holds its LinearFit copy
 	prev    [nPrev]paint.ImageOp // linear, linked stretch, unlinked stretch
 	prevW   int
 	hasWCS  bool
@@ -102,14 +101,11 @@ type ui struct {
 	viewGrid, viewPts, viewRes widget.Clickable
 	openAll, moreBtn, weakBtn  widget.Clickable
 	clearAll                   widget.Clickable // remove all tiles
-	fitBtn                     widget.Clickable // LinearFit on / off
-	bgBtn                      widget.Clickable // background match on / off
-	bgEq                       bool             // stitch evens out backgrounds over the overlaps
+	lfit, bgEq                 widget.Bool      // stitch applies LinearFit / evens out backgrounds over the overlaps
 	more                       bool             // «Дополнительно» row shown
 	weak                       []cellPair       // neighbours the stars could not tie together
 	stretch, link              widget.Bool
-	fmtBtn                     widget.Clickable
-	format                     int // index in saveFormats
+	format                     int // index in saveFormats: the type last picked in the save dialog
 	view                       int // 0 grid, 1 points, 2 result
 
 	rows, cols int
@@ -161,6 +157,7 @@ func main() {
 		u.overlapEd.SetText("15")
 		u.angleEd.SetText("0")
 		u.link.Value, u.clamp.Value, u.it = true, true, interpLanczos4
+		u.lfit.Value, u.bgEq.Value = true, true
 		u.pairList.Axis = layout.Vertical
 		var ops op.Ops
 		for {
@@ -240,14 +237,8 @@ func (u *ui) handle(gtx layout.Context) {
 			u.cur = nil
 		}
 	}
-	if u.fitBtn.Clicked(gtx) && !u.busy {
-		u.linearFitTiles()
-	}
-	if u.bgBtn.Clicked(gtx) && !u.busy {
-		u.bgEq = !u.bgEq
-		if u.result != nil {
-			u.stitch()
-		}
+	if ch := u.lfit.Update(gtx); (u.bgEq.Update(gtx) || ch) && u.result != nil && !u.busy {
+		u.stitch()
 	}
 	if u.clearAll.Clicked(gtx) && !u.busy {
 		u.tiles, u.points, u.weak, u.cur = map[cell]*tileState{}, map[cellPair][]PointPair{}, nil, nil
@@ -279,9 +270,6 @@ func (u *ui) handle(gtx layout.Context) {
 	u.stretch.Update(gtx)
 	u.link.Update(gtx)
 	u.clamp.Update(gtx)
-	if u.fmtBtn.Clicked(gtx) {
-		u.format = (u.format + 1) % len(saveFormats)
-	}
 	u.handleGeom(gtx)
 	if u.stitchBtn.Clicked(gtx) && !u.busy {
 		u.stitch()
@@ -354,7 +342,7 @@ func (u *ui) open(k cell) {
 		pv := previews(img, previewSide)
 		u.post(func() {
 			t.loading = false
-			t.path, t.img, t.orig, t.hasWCS = path, img, nil, parseWCS(img) != nil
+			t.path, t.img, t.hasWCS = path, img, parseWCS(img) != nil
 			for i, p := range pv {
 				t.prev[i] = paint.NewImageOp(p)
 			}
@@ -460,74 +448,6 @@ func (u *ui) gather() (tiles []*Tile, cells []cell, pts map[pairKey][]PointPair,
 	return tiles, cells, pts, ov / 100
 }
 
-func (u *ui) fitted() bool {
-	for _, t := range u.tiles {
-		if t.orig != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// linearFitTiles equalises tile brightness PixInsight-style (see linearFit), or restores the
-// originals when it is already on. The stitch then works on the fitted copies.
-func (u *ui) linearFitTiles() {
-	if u.fitted() {
-		u.busy = true
-		go func() {
-			type res struct {
-				t  *tileState
-				pv [nPrev]*image.RGBA
-			}
-			var rs []res
-			for _, t := range u.tiles {
-				if t.orig != nil {
-					rs = append(rs, res{t, previews(t.orig, previewSide)})
-				}
-			}
-			u.post(func() {
-				for _, r := range rs {
-					r.t.img, r.t.orig = r.t.orig, nil
-					r.t.setPrev(r.pv)
-				}
-				u.busy = false
-				u.status = "LinearFit снят: плитки как загружены"
-			})
-		}()
-		return
-	}
-	tiles, cells, pts, ov := u.gather()
-	if len(tiles) < 2 {
-		u.status = "Нужно минимум две плитки"
-		return
-	}
-	u.busy = true
-	u.status = "LinearFit: ищу перекрытия по звёздам…"
-	go func() {
-		W, _, _ := place(tiles, pts, ov)
-		u.post(func() { u.status = "LinearFit: подгоняю яркость…" })
-		fit, notes := linearFit(tiles, W)
-		pvs := make([][nPrev]*image.RGBA, len(fit))
-		parallel(len(fit), func(lo, hi int) {
-			for i := lo; i < hi; i++ {
-				pvs[i] = previews(fit[i], previewSide)
-			}
-		})
-		u.post(func() {
-			u.busy = false
-			for i, k := range cells {
-				t := u.tiles[k]
-				if t == nil || t.img != tiles[i].Img || fit[i] == tiles[i].Img {
-					continue // replaced meanwhile, or the reference tile
-				}
-				t.orig, t.img = t.img, fit[i]
-				t.setPrev(pvs[i])
-			}
-			u.status = "LinearFit: " + strings.Join(notes, "; ") + ". Нажмите «Склеить»"
-		})
-	}()
-}
-
 func (t *tileState) setPrev(pv [nPrev]*image.RGBA) {
 	for i, p := range pv {
 		t.prev[i] = paint.NewImageOp(p)
@@ -544,9 +464,17 @@ func (u *ui) stitch() {
 	ov *= 100
 	u.busy = true
 	u.status = "Сшиваю…"
-	bgEq := u.bgEq
+	lfit, bgEq := u.lfit.Value, u.bgEq.Value
 	go func() {
 		W, notes, weak := place(tiles, pts, ov/100)
+		if lfit {
+			u.post(func() { u.status = "LinearFit: подгоняю яркость…" })
+			fit, ln := linearFit(tiles, W)
+			for i := range tiles {
+				tiles[i].Img = fit[i]
+			}
+			notes = append(notes, "LinearFit: "+strings.Join(ln, "; "))
+		}
 		if bgEq {
 			u.post(func() { u.status = "Выравниваю фон по перекрытиям…" })
 			imgs, bn := matchBackground(tiles, W)
@@ -593,23 +521,21 @@ func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
 // A name typed without the format's extension (or with another one) gets it appended, so the
 // writer is always the selected format.
 func (u *ui) save() {
-	sf := saveFormats[u.format]
 	res := u.result
+	def := u.format
 	u.busy = true
 	go func() {
-		f, err := u.expl.CreateFile("mosaic." + sf.ext)
-		if err != nil {
+		path, k, ok := u.saveDialog("mosaic", def)
+		if !ok {
 			u.post(func() { u.busy = false })
 			return
 		}
-		path := f.(interface{ Name() string }).Name()
-		f.Close()
+		sf := saveFormats[k]
 		if ext := strings.ToLower(filepath.Ext(path)); ext != "."+sf.ext && !(sf.ext == "fits" && (ext == ".fit" || ext == ".fts")) && !(sf.ext == "tif" && ext == ".tiff") && !(sf.ext == "jpg" && ext == ".jpeg") {
-			os.Remove(path) // empty file the dialog created
-			path += "." + sf.ext
+			path += "." + sf.ext // the chosen type decides the format, not a typed extension
 		}
-		u.post(func() { u.status = "Сохраняю…" })
-		err = saveImage(path, res, sf.float)
+		u.post(func() { u.status = "Сохраняю…"; u.format = k })
+		err := saveImage(path, res, sf.float)
 		u.post(func() {
 			u.busy = false
 			if err != nil {
@@ -652,29 +578,20 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(material.Body1(th, "Вид:").Layout), sp,
 		tab(&u.viewGrid, "Плитки", u.view != 2), tab(&u.viewRes, resTab, u.view == 2), sp, sp,
 		btn(&u.openAll, "Открыть плитки…"), sp,
-		btn(&u.clearAll, "Очистить плитки"), sp,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			b := material.Button(th, &u.fitBtn, "LinearFit")
-			if u.fitted() {
-				b.Text = "LinearFit: вкл"
-				b.Background = color.NRGBA{R: 0x2e, G: 0x8b, B: 0x57, A: 0xff}
-			}
-			return b.Layout(gtx)
-		}), sp,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			b := material.Button(th, &u.bgBtn, "Фон по перекрытию")
-			if u.bgEq {
-				b.Text = "Фон по перекрытию: вкл"
-				b.Background = color.NRGBA{R: 0x2e, G: 0x8b, B: 0x57, A: 0xff}
-			}
-			return b.Layout(gtx)
-		}), sp,
+		layout.Rigid(checkBox(th, &u.lfit, "LinearFit").Layout), sp,
+		layout.Rigid(checkBox(th, &u.bgEq, "Фон по перекрытию").Layout), sp,
 		btn(&u.stitchBtn, "Склеить"),
+		layout.Flexed(1, layout.Spacer{}.Layout), // «Очистить плитки» stands apart, at the far right
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			b := material.Button(th, &u.clearAll, "Очистить плитки")
+			b.Background = color.NRGBA{R: 0x80, G: 0x30, B: 0x30, A: 0xff}
+			return b.Layout(gtx)
+		}),
 	}
 	row2 := []layout.FlexChild{
-		layout.Rigid(material.CheckBox(th, &u.stretch, "Авторастяжение (как Siril, только просмотр)").Layout),
-		layout.Rigid(material.CheckBox(th, &u.link, "Связать каналы").Layout), sp,
-		btn(&u.fmtBtn, "Формат: "+saveFormats[u.format].label), sp, btn(&u.saveBtn, "Сохранить…"), sp,
+		layout.Rigid(checkBox(th, &u.stretch, "Авторастяжение").Layout),
+		layout.Rigid(checkBox(th, &u.link, "Связать каналы").Layout), sp,
+		btn(&u.saveBtn, "Сохранить…"), sp,
 		btn(&u.moreBtn, more),
 	}
 	if len(u.weak) > 0 {
@@ -1305,7 +1222,7 @@ func (u *ui) geomBar(gtx layout.Context) layout.Dimensions {
 						return material.Editor(th, &u.angleEd, "").Layout(gtx)
 					}), sp,
 					btn(&u.interpBtn, "Интерполяция: "+interpNames[u.it]), sp,
-					layout.Rigid(material.CheckBox(th, &u.clamp, "Ограничение").Layout),
+					layout.Rigid(checkBox(th, &u.clamp, "Ограничение").Layout),
 				)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
@@ -1319,4 +1236,11 @@ func (u *ui) geomBar(gtx layout.Context) layout.Dimensions {
 			}),
 		)
 	})
+}
+
+// checkBox is material.CheckBox with a tick that stands out on the dark theme.
+func checkBox(th *material.Theme, b *widget.Bool, label string) material.CheckBoxStyle {
+	c := material.CheckBox(th, b, label)
+	c.IconColor = color.NRGBA{R: 0x6c, G: 0xb4, B: 0xff, A: 0xff}
+	return c
 }
