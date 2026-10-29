@@ -11,7 +11,9 @@
 ## Сборка
 
 ```
-go build -ldflags="-H windowsgui" -o astro_mosaic.exe .
+powershell -ExecutionPolicy Bypass -File build.ps1
 ```
+
+Скрипт собирает с `-trimpath` (без него Windows Defender ложно блокирует exe как `Bearfoos.A!ml`) и проверяет, что exe запускается.
 
 Иконка и ресурсы Windows — в `winres/` (`go-winres make` после изменения).
