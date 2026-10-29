@@ -95,12 +95,13 @@ type ui struct {
 	expl  *explorer.Explorer
 	tasks chan func()
 
-	overlapEd                  widget.Editor
+	overlapSl                  widget.Float // overlap kept round the seams, 0..maxOverlap %
+	overlapDrag                bool         // the slider was being dragged last frame
 	stitchBtn, gridBtn         widget.Clickable
 	grid                       gridPicker // Word-style rows × cols chooser under gridBtn
 	saveBtn, clearPts          widget.Clickable
 	viewGrid, viewPts, viewRes widget.Clickable
-	openAll, moreBtn, weakBtn  widget.Clickable
+	openAll, weakBtn           widget.Clickable
 	clearAll                   widget.Clickable // remove all tiles
 	chAlign, lfit, bgEq        widget.Bool      // stitch aligns colour channels / applies LinearFit / evens out backgrounds
 	more                       bool             // «Дополнительно» row shown
@@ -150,10 +151,10 @@ func main() {
 		u := &ui{w: w, th: th, expl: explorer.NewExplorer(w), tasks: make(chan func(), 64),
 			rows: 2, cols: 2, tiles: map[cell]*tileState{}, points: map[cellPair][]PointPair{},
 			pairBtns: map[cellPair]*widget.Clickable{}, status: "Нажмите «Открыть плитки…» и выберите все плитки сразу"}
-		for _, e := range []*widget.Editor{&u.overlapEd, &u.angleEd} {
+		for _, e := range []*widget.Editor{&u.angleEd} {
 			e.SingleLine = true
 		}
-		u.overlapEd.SetText("15")
+		u.overlapSl.Value = 15.0 / maxOverlap
 		u.angleEd.SetText("0")
 		u.link.Value, u.clamp.Value, u.it = true, true, interpLanczos4
 		u.chAlign.Value, u.lfit.Value, u.bgEq.Value = true, true, true
@@ -193,12 +194,6 @@ func (u *ui) layout(gtx layout.Context) {
 	u.th.Palette.Bg = color.NRGBA{R: 0x20, G: 0x22, B: 0x26, A: 0xff}
 	layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(u.toolbar),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if !u.more {
-				return layout.Dimensions{}
-			}
-			return u.moreBar(gtx)
-		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			if u.view != 2 || u.result == nil {
 				return layout.Dimensions{}
@@ -266,9 +261,13 @@ func (u *ui) handle(gtx layout.Context) {
 	if u.openAll.Clicked(gtx) && !u.busy {
 		u.openMany()
 	}
-	if u.moreBtn.Clicked(gtx) {
-		u.more = !u.more
+	// a changed overlap re-stitches once the slider is let go, not on every step of the drag
+	if u.overlapSl.Update(gtx) || u.overlapDrag && !u.overlapSl.Dragging() {
+		if !u.overlapSl.Dragging() && u.result != nil && !u.busy {
+			u.stitch()
+		}
 	}
+	u.overlapDrag = u.overlapSl.Dragging()
 	if u.weakBtn.Clicked(gtx) && len(u.weak) > 0 {
 		p := u.weak[0]
 		u.cur, u.view = &p, 1
@@ -456,11 +455,7 @@ func (u *ui) gather() (tiles []*Tile, cells []cell, pts map[pairKey][]PointPair,
 			pts[pairKey{a, b}] = list
 		}
 	}
-	ov, err := strconv.ParseFloat(strings.TrimSpace(u.overlapEd.Text()), 64)
-	if err != nil || ov < 0 || ov >= 90 {
-		ov = 15
-	}
-	return tiles, cells, pts, ov / 100
+	return tiles, cells, pts, u.overlapPct() / 100
 }
 
 func (t *tileState) setPrev(pv [nPrev]*image.RGBA) {
@@ -593,11 +588,7 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 			return b.Layout(gtx)
 		})
 	}
-	more := "Дополнительно ▼"
-	if u.more {
-		more = "Дополнительно ▲"
-	}
-	// row 1: which view, then the stitching steps in order; row 2: display and saving
+	// row 1: grid, view, then the stitching steps in order; row 2: display and stitching details
 	resTab := "Результат"
 	if u.result == nil {
 		resTab = "Результат (нет)"
@@ -610,7 +601,17 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(checkBox(th, &u.chAlign, "Совместить каналы").Layout), sp,
 		layout.Rigid(checkBox(th, &u.lfit, "LinearFit").Layout), sp,
 		layout.Rigid(checkBox(th, &u.bgEq, "Фон по перекрытию").Layout), sp,
-		btn(&u.stitchBtn, "Склеить"),
+		btn(&u.stitchBtn, "Склеить"), sp,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if u.result == nil || u.busy { // nothing to save yet
+				gtx = gtx.Disabled()
+				b := material.Button(th, &u.saveBtn, "Сохранить…")
+				b.Background = color.NRGBA{R: 0x33, G: 0x36, B: 0x3d, A: 0xff}
+				b.Color = color.NRGBA{R: 0x78, G: 0x7c, B: 0x84, A: 0xff}
+				return b.Layout(gtx)
+			}
+			return material.Button(th, &u.saveBtn, "Сохранить…").Layout(gtx)
+		}),
 		layout.Flexed(1, layout.Spacer{}.Layout), // «Очистить плитки» stands apart, at the far right
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			b := material.Button(th, &u.clearAll, "Очистить плитки")
@@ -620,9 +621,13 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 	}
 	row2 := []layout.FlexChild{
 		layout.Rigid(checkBox(th, &u.stretch, "Авторастяжение").Layout),
-		layout.Rigid(checkBox(th, &u.link, "Связать каналы").Layout), sp,
-		btn(&u.saveBtn, "Сохранить…"), sp,
-		btn(&u.moreBtn, more),
+		layout.Rigid(checkBox(th, &u.link, "Связать каналы").Layout), sp, sp,
+		layout.Rigid(material.Body1(th, fmt.Sprintf("Перекрытие у шва: %2.0f%%", u.overlapPct())).Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Min.X, gtx.Constraints.Max.X = gtx.Dp(200), gtx.Dp(200)
+			return layout.Inset{Left: unit.Dp(6), Right: unit.Dp(6)}.Layout(gtx, material.Slider(th, &u.overlapSl).Layout)
+		}), sp,
+		btn(&u.viewPts, "Ручные точки"),
 	}
 	if len(u.weak) > 0 {
 		row2 = append(row2, sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -643,27 +648,13 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-// moreBar holds what automatic stitching rarely needs: manual grid, overlap crop and star points.
-func (u *ui) moreBar(gtx layout.Context) layout.Dimensions {
-	th := u.th
-	ed := func(e *widget.Editor, label string) layout.FlexChild {
-		return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(material.Body1(th, label).Layout),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					gtx.Constraints.Min.X, gtx.Constraints.Max.X = gtx.Dp(36), gtx.Dp(36)
-					return material.Editor(th, e, "").Layout(gtx)
-				}))
-		})
-	}
-	sp := layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout)
-	return layout.Inset{Left: unit.Dp(6), Right: unit.Dp(6), Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-			ed(&u.overlapEd, "Оставить перекрытие % "), sp, sp,
-			layout.Rigid(material.Button(th, &u.viewPts, "Ручные точки").Layout),
-		)
-	})
-}
+// maxOverlap is the slider's top, in % of the tile. The overlap kept round a seam is the zone
+// where the background is feathered; 0 is a butt joint. Past the tiles' real overlap (typically
+// 10–30%) nothing changes, and past half a tile two frames are no longer side by side.
+const maxOverlap = 50
+
+// overlapPct is the slider value in whole per cent.
+func (u *ui) overlapPct() float64 { return math.Round(float64(u.overlapSl.Value) * maxOverlap) }
 
 func (u *ui) si() int {
 	switch {
