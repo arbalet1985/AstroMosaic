@@ -231,7 +231,11 @@ func (u *ui) layout(gtx layout.Context) {
 				}))
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.UniformInset(unit.Dp(6)).Layout(gtx, material.Body2(u.th, u.status).Layout)
+			status := u.status
+			if u.clamp.Hovered() { // hint while the pointer is over the checkbox
+				status = clampHint
+			}
+			return layout.UniformInset(unit.Dp(6)).Layout(gtx, material.Body2(u.th, status).Layout)
 		}),
 	)
 }
@@ -1239,7 +1243,7 @@ func (u *ui) geomBar(gtx layout.Context) layout.Dimensions {
 						return material.Editor(th, &u.angleEd, "").Layout(gtx)
 					}), sp,
 					btn(&u.interpBtn, "Интерполяция: "+interpNames[u.it]), sp,
-					layout.Rigid(checkBox(th, &u.clamp, "Ограничение").Layout),
+					layout.Rigid(checkBox(th, &u.clamp, "Без ореолов").Layout),
 				)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
@@ -1284,3 +1288,6 @@ func (u *ui) setGrid(r, c int) {
 	u.cur, u.weak, u.view = nil, nil, 0
 	u.status = fmt.Sprintf("Сетка %d × %d. Щёлкните по ячейке, чтобы открыть или заменить плитку", r, c)
 }
+
+const clampHint = "«Без ореолов»: при повороте бикубическая интерполяция и Lanczos могут дать тёмное кольцо вокруг ярких звёзд; " +
+	"галочка не даёт новому пикселю выйти за яркость четырёх соседних (как Clamping в Siril). На «ближайший» и билинейную не влияет."
