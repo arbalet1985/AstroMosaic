@@ -555,9 +555,9 @@ func (r region) has(u, v, X, Y float64) bool {
 	return true
 }
 
-// weight rises smoothly from the region's border (image edge or seam cut) over half the tile size.
-func (r region) weight(u, v, X, Y float64) float64 {
-	dx, dy := math.Min(u, r.w-u), math.Min(v, r.h-v)
+// dist returns the distances (px) from the region's border along the tile's x and y axes.
+func (r region) dist(u, v, X, Y float64) (dx, dy float64) {
+	dx, dy = math.Min(u, r.w-u), math.Min(v, r.h-v)
 	for _, c := range r.cuts {
 		if d := c.c - (c.nx*X + c.ny*Y); c.alongX {
 			dx = math.Min(dx, d)
@@ -565,6 +565,25 @@ func (r region) weight(u, v, X, Y float64) float64 {
 			dy = math.Min(dy, d)
 		}
 	}
+	return dx, dy
+}
+
+// depth ranks tiles for the detail band: distance to the nearest seam cut, less a penalty within
+// edgeBand px of the tile's own edge. Edges shared by the overlapping tiles (the mosaic's outer
+// border) cost both the same, so the seam alone decides where the detail switches.
+func (r region) depth(u, v, X, Y float64) float64 {
+	d := math.Max(r.w, r.h)
+	for _, c := range r.cuts {
+		d = math.Min(d, c.c-(c.nx*X+c.ny*Y))
+	}
+	const edgeBand = 64
+	e := math.Min(math.Min(u, r.w-u), math.Min(v, r.h-v))
+	return d - 4*math.Max(0, edgeBand-e)
+}
+
+// weight rises smoothly from the region's border (image edge or seam cut) over half the tile size.
+func (r region) weight(u, v, X, Y float64) float64 {
+	dx, dy := r.dist(u, v, X, Y)
 	s := func(d, half float64) float64 {
 		t := math.Min(1, (d+1)/half)
 		return t * t * (3 - 2*t)
@@ -865,11 +884,15 @@ func fitPhotometry(tiles []*Tile, W []Warp, C int) [][]phot {
 }
 
 // render blends all tiles in two bands: the blurred background is feathered across the whole
-// overlap (no brightness step), while detail and noise switch over a narrow zone at the seam
-// (no doubled stars, no smoother band where two noisy tiles would be averaged).
+// overlap (no brightness step), while detail and noise switch over a few pixels where the tiles
+// are equally deep in their regions (no doubled stars). A wide detail crossfade would average two
+// tiles' noise into a quieter strip, which a stretch then shows as a light band along the seam.
 // Pixels cropped away are still used where no other tile covers the mosaic. With exact regions
 // (overlap 0) each pixel is taken whole from one tile: the one it lies deepest in, which also
 // settles the corner where four seam lines do not meet in a single point.
+// seamTau (px) sets the detail crossfade: a tile 3τ shallower than its neighbour weighs 5%.
+const seamTau = 2.0
+
 func render(tiles []*Tile, W []Warp, crop []region) *Img {
 	n := len(tiles)
 	type box struct{ x0, y0, x1, y1 float64 }
@@ -906,6 +929,7 @@ func render(tiles []*Tile, W []Warp, crop []region) *Img {
 				X := float64(x) + ox
 				for pass := 0; pass < 2; pass++ { // pass 1: cropped-away pixels fill holes
 					var wl, wh float64
+					dref := math.Inf(-1) // detail weights are exp((depth − dref)/τ), dref the deepest so far
 					clear(sl)
 					clear(sh)
 					best, bestW := -1, -1.0
@@ -929,18 +953,25 @@ func render(tiles []*Tile, W []Warp, crop []region) *Img {
 							}
 							continue
 						}
-						w2 := w * w
-						w4 := w2 * w2
-						w8 := w4 * w4
+						depth := r.depth(u, v, X, Y)
+						if depth > dref {
+							k := math.Exp((dref - depth) / seamTau)
+							for c := range sh {
+								sh[c] *= k
+							}
+							wh *= k
+							dref = depth
+						}
+						wd := math.Exp((depth - dref) / seamTau)
 						for c := 0; c < C; c++ {
 							p := P[i][c]
 							l := float64(bilinear(low[i], ch(t, c), u, v))
 							hf := float64(bilinear(t.Img, ch(t, c), u, v)) - l
 							sl[c] += w * (p.g*l + p.b)
-							sh[c] += w8 * p.g * hf
+							sh[c] += wd * p.g * hf
 						}
 						wl += w
-						wh += w8
+						wh += wd
 					}
 					if best >= 0 {
 						t := tiles[best]

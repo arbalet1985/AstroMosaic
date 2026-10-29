@@ -353,3 +353,35 @@ func TestMatchBackground(t *testing.T) {
 		t.Fatalf("background still differs by %.4f (was %.4f)", after, before)
 	}
 }
+
+// TestSeamNoise: two tiles of equal noise; the noise must stay even across the overlap. A wide
+// detail crossfade averaged the two tiles into a quieter strip that a stretch shows as a light band.
+func TestSeamNoise(t *testing.T) {
+	shift := Aff{1, 0, 150, 0, 1, 0}
+	a := mkTile(tileW, 200, identity, 0, nil, 1, noBg)
+	b := mkTile(tileW, 200, shift, 0, nil, 1, noBg)
+	rng := rand.New(rand.NewSource(4))
+	for _, m := range []*Img{a.Img, b.Img} {
+		for i := range m.Pix {
+			m.Pix[i] += float32(0.01 * rng.NormFloat64())
+		}
+	}
+	tiles := []*Tile{a, b}
+	W := []Warp{newWarp(identity, 0, a.Img), newWarp(shift, 0, b.Img)}
+	out := render(tiles, W, seamCuts(tiles, W, 0.4))
+	lo, hi := math.Inf(1), 0.0
+	for x := 20; x < out.W-28; x += 8 { // noise of 8-px columns, rows 20..180
+		var s, s2, n float64
+		for y := 20; y < 180; y++ {
+			for xx := x; xx < x+8; xx++ {
+				v := float64(out.at(0, xx, y))
+				s, s2, n = s+v, s2+v*v, n+1
+			}
+		}
+		sd := math.Sqrt(s2/n - (s/n)*(s/n))
+		lo, hi = math.Min(lo, sd), math.Max(hi, sd)
+	}
+	if lo < 0.9*hi {
+		t.Fatalf("noise dips to %.4f against %.4f across the seam", lo, hi)
+	}
+}
