@@ -102,7 +102,7 @@ type ui struct {
 	viewGrid, viewPts, viewRes widget.Clickable
 	openAll, moreBtn, weakBtn  widget.Clickable
 	clearAll                   widget.Clickable // remove all tiles
-	lfit, bgEq                 widget.Bool      // stitch applies LinearFit / evens out backgrounds over the overlaps
+	chAlign, lfit, bgEq        widget.Bool      // stitch aligns colour channels / applies LinearFit / evens out backgrounds
 	more                       bool             // «Дополнительно» row shown
 	weak                       []cellPair       // neighbours the stars could not tie together
 	stretch, link              widget.Bool
@@ -156,7 +156,7 @@ func main() {
 		u.overlapEd.SetText("15")
 		u.angleEd.SetText("0")
 		u.link.Value, u.clamp.Value, u.it = true, true, interpLanczos4
-		u.lfit.Value, u.bgEq.Value = true, true
+		u.chAlign.Value, u.lfit.Value, u.bgEq.Value = true, true, true
 		u.pairList.Axis = layout.Vertical
 		var ops op.Ops
 		for {
@@ -254,7 +254,7 @@ func (u *ui) handle(gtx layout.Context) {
 			u.grid.open = false
 		}
 	}
-	if ch := u.lfit.Update(gtx); (u.bgEq.Update(gtx) || ch) && u.result != nil && !u.busy {
+	if ch := u.chAlign.Update(gtx); (u.lfit.Update(gtx) || u.bgEq.Update(gtx) || ch) && u.result != nil && !u.busy {
 		u.stitch()
 	}
 	if u.clearAll.Clicked(gtx) && !u.busy {
@@ -479,9 +479,22 @@ func (u *ui) stitch() {
 	ov *= 100
 	u.busy = true
 	u.status = "Сшиваю…"
-	lfit, bgEq := u.lfit.Value, u.bgEq.Value
+	chAlign, lfit, bgEq := u.chAlign.Value, u.lfit.Value, u.bgEq.Value
 	go func() {
+		var chNotes []string
+		if chAlign { // per tile, in its own optics frame, before the stars are matched across tiles
+			u.post(func() { u.status = "Совмещаю цветовые каналы по звёздам…" })
+			for _, t := range tiles {
+				if img, note := alignChannels(t.Img); note != "" {
+					t.Img = img
+					chNotes = append(chNotes, t.Name+": "+note)
+				}
+			}
+		}
 		W, notes, weak := place(tiles, pts, ov/100)
+		if len(chNotes) > 0 {
+			notes = append(notes, "каналы: "+strings.Join(chNotes, "; "))
+		}
 		if lfit {
 			u.post(func() { u.status = "LinearFit: подгоняю яркость…" })
 			fit, ln := linearFit(tiles, W)
@@ -594,6 +607,7 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(material.Body1(th, "Вид:").Layout), sp,
 		tab(&u.viewGrid, "Плитки", u.view != 2), tab(&u.viewRes, resTab, u.view == 2), sp, sp,
 		btn(&u.openAll, "Открыть плитки…"), sp,
+		layout.Rigid(checkBox(th, &u.chAlign, "Совместить каналы").Layout), sp,
 		layout.Rigid(checkBox(th, &u.lfit, "LinearFit").Layout), sp,
 		layout.Rigid(checkBox(th, &u.bgEq, "Фон по перекрытию").Layout), sp,
 		btn(&u.stitchBtn, "Склеить"),
