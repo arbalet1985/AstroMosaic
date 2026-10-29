@@ -1245,10 +1245,16 @@ func (u *ui) geomBar(gtx layout.Context) layout.Dimensions {
 			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					btn(&u.cropBtn, "Кадрировать"), sp, btn(&u.rotBtn, "Повернуть всё"), sp,
+					btn(&u.rotBtn, "Повернуть всё"), sp,
 					btn(&u.rotL, "90° влево"), sp, btn(&u.rotR, "90° вправо"), sp,
 					btn(&u.flipH, "Отразить ↔"), sp, btn(&u.flipV, "Отразить ↕"), sp,
 					btn(&u.clrSel, "Снять рамку"), sp, btn(&u.undo, "Отменить"),
+					layout.Flexed(1, layout.Spacer{}.Layout), // «Кадрировать» applies the frame: apart, at the far right
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						b := material.Button(th, &u.cropBtn, "Кадрировать")
+						b.Background = color.NRGBA{R: 0x2e, G: 0x8b, B: 0x57, A: 0xff}
+						return b.Layout(gtx)
+					}),
 				)
 			}),
 		)
