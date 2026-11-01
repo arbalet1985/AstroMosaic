@@ -5,7 +5,6 @@ import (
 	"math"
 	"runtime"
 	"sort"
-	"strconv"
 	"sync"
 )
 
@@ -59,23 +58,24 @@ func fitSimilarity(src, dst [][2]float64) Aff {
 	return Aff{a, -b, mdx - (a*msx - b*msy), b, a, mdy - (b*msx + a*msy)}
 }
 
-// ---------- WCS (TAN, linear part only; ponytail: SIP distortion ignored) ----------
+// ---------- WCS (TAN with optional SIP detector distortion) ----------
 
 type WCS struct {
 	ra0, dec0, crpix1, crpix2 float64
 	cd, icd                   [4]float64
 	h                         int
 	bottomUp                  bool
+	sip                       *sipDistortion
 }
 
 func parseWCS(m *Img) *WCS {
-	f := func(k string) (float64, bool) {
-		v, ok := m.Hdr[k]
-		if !ok {
-			return 0, false
+	for key, prefix := range map[string]string{"CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN"} {
+		if value := m.Hdr[key]; value != "" && value != prefix && value != prefix+"-SIP" {
+			return nil
 		}
-		x, err := strconv.ParseFloat(v, 64)
-		return x, err == nil
+	}
+	f := func(k string) (float64, bool) {
+		return headerFloat(m.Hdr, k)
 	}
 	ra, ok1 := f("CRVAL1")
 	dec, ok2 := f("CRVAL2")
@@ -112,10 +112,18 @@ func parseWCS(m *Img) *WCS {
 		return nil
 	}
 	w.icd = [4]float64{w.cd[3] / det, -w.cd[1] / det, -w.cd[2] / det, w.cd[0] / det}
+	var err error
+	w.sip, err = parseSIP(m)
+	if err != nil {
+		return nil
+	}
 	return w
 }
 
 func (w *WCS) pixToSky(x, y float64) (ra, dec float64) {
+	if w.sip != nil {
+		x, y = w.sip.forward(x, y)
+	}
 	p2 := y + 1
 	if w.bottomUp {
 		p2 = float64(w.h) - y
@@ -135,6 +143,9 @@ func (w *WCS) skyToPix(ra, dec float64) (x, y float64) {
 	sd, cd := math.Sincos(dec)
 	sa, ca := math.Sincos(ra - w.ra0)
 	cosc := sd0*sd + cd0*cd*ca
+	if cosc <= 0 {
+		return math.NaN(), math.NaN()
+	}
 	xi := cd * sa / cosc * 180 / math.Pi
 	eta := (cd0*sd - sd0*cd*ca) / cosc * 180 / math.Pi
 	p1 := w.crpix1 + w.icd[0]*xi + w.icd[1]*eta
@@ -143,6 +154,13 @@ func (w *WCS) skyToPix(ra, dec float64) (x, y float64) {
 	y = p2 - 1
 	if w.bottomUp {
 		y = float64(w.h) - p2
+	}
+	if w.sip != nil {
+		var ok bool
+		x, y, ok = w.sip.inverse(x, y)
+		if !ok {
+			return math.NaN(), math.NaN()
+		}
 	}
 	return
 }
@@ -182,11 +200,19 @@ func edge(ta, tb *Tile, pts []PointPair, overlap float64) (Aff, float64, string)
 			for _, fx := range []float64{0, 0.5, 1} {
 				x, y := fx*float64(tb.Img.W-1), fy*float64(tb.Img.H-1)
 				ax, ay := ta.wcs.skyToPix(tb.wcs.pixToSky(x, y))
+				if math.IsNaN(ax) || math.IsNaN(ay) || math.IsInf(ax, 0) || math.IsInf(ay, 0) {
+					continue
+				}
 				src = append(src, [2]float64{x, y})
 				dst = append(dst, [2]float64{ax, ay})
 			}
 		}
-		t := fitSimilarity(src, dst)
+		t := identity
+		if len(src) >= 3 {
+			t = fitSimilarity(src, dst)
+		} else {
+			t[0] = 0
+		}
 		// the sky is the authority, not the grid labels; only reject a broken solution (scale far off)
 		if s := math.Hypot(t[0], t[3]); s > 0.5 && s < 2 {
 			return t, 10 + dist, "WCS"
@@ -199,19 +225,32 @@ func edge(ta, tb *Tile, pts []PointPair, overlap float64) (Aff, float64, string)
 
 // Warp maps tile pixels to the mosaic: shared radial lens correction, then a per-tile similarity.
 type Warp struct {
-	S, Si      Aff     // similarity and its inverse
-	K          float64 // radial k1, r normalised by the half-diagonal
+	S, Si      Aff        // similarity and its inverse
+	K          float64    // radial k1, r normalised by the half-diagonal
+	extra      [3]float64 // k2, p1, p2; used only after held-out validation
 	cx, cy, rn float64
+	sip        *sipDistortion
+	plane      *tangentProjection
 }
 
 func newWarp(S Aff, K float64, m *Img) Warp {
-	return Warp{S: S, Si: S.inv(), K: K, cx: float64(m.W-1) / 2, cy: float64(m.H-1) / 2, rn: math.Hypot(float64(m.W), float64(m.H)) / 2}
+	sip, _ := parseSIP(m)
+	if sip != nil {
+		K = 0
+	} // supplied detector calibration replaces empirical radial correction
+	return Warp{S: S, Si: S.inv(), K: K, cx: float64(m.W-1) / 2, cy: float64(m.H-1) / 2, rn: math.Hypot(float64(m.W), float64(m.H)) / 2, sip: sip}
 }
 
 func (w Warp) undist(x, y float64) (float64, float64) {
-	dx, dy := x-w.cx, y-w.cy
-	f := 1 + w.K*(dx*dx+dy*dy)/(w.rn*w.rn)
-	return w.cx + dx*f, w.cy + dy*f
+	if w.sip != nil {
+		x, y = w.sip.forward(x, y)
+	} else {
+		x, y = w.lensForward(x, y)
+	}
+	if w.plane != nil {
+		return w.plane.forward.apply(x, y)
+	}
+	return x, y
 }
 
 func (w Warp) apply(x, y float64) (float64, float64) { return w.S.apply(w.undist(x, y)) }
@@ -219,8 +258,26 @@ func (w Warp) apply(x, y float64) (float64, float64) { return w.S.apply(w.undist
 // inv maps mosaic coords back to tile pixels (fixed-point inversion of the radial term).
 func (w Warp) inv(X, Y float64) (float64, float64) {
 	qx, qy := w.Si.apply(X, Y)
+	if w.plane != nil {
+		qx, qy = w.plane.inverse.apply(qx, qy)
+	}
+	if !finitePoint(qx, qy) {
+		return -1, -1
+	}
+	if w.sip != nil {
+		x, y, ok := w.sip.inverse(qx, qy)
+		if !ok {
+			return -1, -1
+		}
+		return x, y
+	}
 	if w.K == 0 {
-		return qx, qy
+		if w.extra == [3]float64{} {
+			return qx, qy
+		}
+	}
+	if w.extra != [3]float64{} {
+		return w.lensInverse(qx, qy)
 	}
 	ex, ey := qx-w.cx, qy-w.cy
 	dx, dy := ex, ey
@@ -319,10 +376,16 @@ func simRow(k int, q [2]float64, sign float64, y bool, idx []int, c []float64, r
 
 // solveWarps fits all similarities at once for a given K; init (weakly) holds tiles without stars.
 func solveWarps(tiles []*Tile, init []Aff, ms []match, K float64) []Warp {
+	return solveWarpsModel(tiles, init, ms, lensModel{K, 0, 0, 0})
+}
+
+func solveWarpsModel(tiles []*Tile, init []Aff, ms []match, model lensModel) []Warp {
 	n := len(tiles)
-	W := make([]Warp, n)
-	for i, t := range tiles {
-		W[i] = newWarp(identity, K, t.Img)
+	W := initialWarps(tiles, model[0])
+	for i := range W {
+		if W[i].sip == nil {
+			W[i].extra = [3]float64{model[1], model[2], model[3]}
+		}
 	}
 	if n == 1 {
 		return W
@@ -347,6 +410,9 @@ func solveWarps(tiles []*Tile, init []Aff, ms []match, K float64) []Warp {
 			X, Y := init[k].apply(p[0], p[1])
 			q := [2]float64{}
 			q[0], q[1] = W[k].undist(p[0], p[1])
+			if W[k].plane != nil {
+				X, Y = q[0], q[1]
+			}
 			for _, y := range []bool{false, true} {
 				rhs := X
 				if y {
@@ -360,7 +426,8 @@ func solveWarps(tiles []*Tile, init []Aff, ms []match, K float64) []Warp {
 	x := s.solve()
 	for k := 1; k < n; k++ {
 		b := 4 * (k - 1)
-		W[k] = newWarp(Aff{x[b], -x[b+1], x[b+2], x[b+1], x[b], x[b+3]}, K, tiles[k].Img)
+		W[k].S = Aff{x[b], -x[b+1], x[b+2], x[b+1], x[b], x[b+3]}
+		W[k].Si = W[k].S.inv()
 	}
 	return W
 }
@@ -396,7 +463,11 @@ func refine(tiles []*Tile, init []Aff, ms []match) ([]Warp, []match, float64) {
 	reject()
 	W = solveWarps(tiles, init, ms, 0)
 	K := 0.0
-	if len(ms) >= 30 {
+	empirical := false
+	for _, w := range W {
+		empirical = empirical || w.sip == nil
+	}
+	if len(ms) >= 30 && empirical {
 		f := func(k float64) float64 { return rms(solveWarps(tiles, init, ms, k), ms) }
 		// golden-section search
 		g := (math.Sqrt(5) - 1) / 2
@@ -427,6 +498,18 @@ func refine(tiles []*Tile, init []Aff, ms []match) ([]Warp, []match, float64) {
 // place returns tile->mosaic warps (reference = first tile), notes, and the sky neighbours that
 // share too few stars to be aligned by them (they rest on WCS or the grid guess unless given points).
 func place(tiles []*Tile, points map[pairKey][]PointPair, overlap float64) ([]Warp, []string, []pairKey) {
+	W, notes, weak, _ := placeMeasured(tiles, points, overlap)
+	return W, notes, weak
+}
+
+type registrationMeasurements struct {
+	matches       []match
+	validationN   int
+	validationRMS float64
+	modelNote     string
+}
+
+func placeMeasured(tiles []*Tile, points map[pairKey][]PointPair, overlap float64) ([]Warp, []string, []pairKey, registrationMeasurements) {
 	n := len(tiles)
 	stars := make([][]star, n)
 	var wg sync.WaitGroup
@@ -486,6 +569,7 @@ func place(tiles []*Tile, points map[pairKey][]PointPair, overlap float64) ([]Wa
 	}
 
 	var ms []match
+	skyWarps := initialWarps(tiles, 0)
 	count := map[pairKey]int{}
 	for a := 0; a < n; a++ {
 		for b := a + 1; b < n; b++ {
@@ -497,7 +581,12 @@ func place(tiles []*Tile, points map[pairKey][]PointPair, overlap float64) ([]Wa
 			if abs(ta.Row-tb.Row)+abs(ta.Col-tb.Col) != 1 {
 				radius *= 2 // composed through other tiles
 			}
-			got := matchStars(stars[a], stars[b], ta.Img.W, ta.Img.H, tb.Img.W, tb.Img.H, A[a].inv().mul(A[b]), radius)
+			var got []PointPair
+			if E[a][b].how == "WCS" && skyWarps[a].plane != nil && skyWarps[b].plane != nil {
+				got = matchStarsMapped(stars[a], stars[b], ta.Img.W, ta.Img.H, tb.Img.W, tb.Img.H, func(x, y float64) (float64, float64) { return skyWarps[a].inv(skyWarps[b].apply(x, y)) }, radius)
+			} else {
+				got = matchStars(stars[a], stars[b], ta.Img.W, ta.Img.H, tb.Img.W, tb.Img.H, A[a].inv().mul(A[b]), radius)
+			}
 			if len(got) < 6 {
 				got = append(got, points[pairKey{a, b}]...)
 			}
@@ -507,13 +596,61 @@ func place(tiles []*Tile, points map[pairKey][]PointPair, overlap float64) ([]Wa
 			count[pairKey{a, b}] = len(got)
 		}
 	}
+	rawMatches := ms
 	W, ms, K := refine(tiles, A, ms)
+	measurement := registrationMeasurements{matches: ms}
+	// Validation points never enter this separate fit. Final rendering still uses
+	// all accepted matches; this score describes the model's predictive error.
+	train, validation := splitMatchTracks(rawMatches)
+	if len(rawMatches) >= 60 && len(train) >= 30 && len(validation) >= 10 {
+		vW, trainingKept, vK := refine(tiles, A, train)
+		measurement.validationN, measurement.validationRMS = len(validation), rms(vW, validation)
+		selected, validationError, modelNote := validatedExtraLens(tiles, A, trainingKept, validation, ms, vW, W, vK)
+		measurement.validationRMS, measurement.modelNote = validationError, modelNote
+		if selected != nil {
+			W = selected
+			for _, w := range W {
+				if w.sip == nil {
+					K = w.K
+					break
+				}
+			}
+		}
+	}
 	var notes []string
+	projected := 0
+	for _, w := range W {
+		if w.plane != nil {
+			projected++
+		}
+	}
+	if projected > 0 {
+		notes = append(notes, fmt.Sprintf("общая TAN-плоскость: %d/%d плиток", projected, len(W)))
+	}
+	for _, t := range tiles {
+		if s, err := parseSIP(t.Img); err != nil {
+			notes = append(notes, t.Name+": "+err.Error()+"; SIP и WCS-привязка не применены")
+		} else if s != nil {
+			notes = append(notes, t.Name+": SIP, без повторной k1")
+		}
+	}
 	for _, l := range links {
 		a, b := min(l.u, l.v), max(l.u, l.v)
 		notes = append(notes, fmt.Sprintf("%s → %s: %s, звёзд %d", tiles[l.u].Name, tiles[l.v].Name, E[l.u][l.v].how, count[pairKey{a, b}]))
 	}
 	notes = append(notes, fmt.Sprintf("совпадений %d, ошибка %.2f px, дисторсия k=%.4f", len(ms), rms(W, ms), K))
+	if measurement.validationN > 0 {
+		notes = append(notes, fmt.Sprintf("проверка на %d отложенных соответствиях: %.2f px", measurement.validationN, measurement.validationRMS))
+	}
+	if measurement.modelNote != "" {
+		notes = append(notes, measurement.modelNote)
+	}
+	for _, w := range W {
+		if w.extra != [3]float64{} {
+			notes = append(notes, fmt.Sprintf("k2=%.5f p1=%.5f p2=%.5f", w.extra[0], w.extra[1], w.extra[2]))
+			break
+		}
+	}
 	var weak []pairKey
 	for k, c := range count {
 		if ok, _, _ := skyNeighbour(W[k.A], W[k.B], tiles[k.A].Img, tiles[k.B].Img); ok && c < 6 && len(points[k]) == 0 {
@@ -521,7 +658,7 @@ func place(tiles []*Tile, points map[pairKey][]PointPair, overlap float64) ([]Wa
 		}
 	}
 	sort.Slice(weak, func(i, j int) bool { return weak[i].A < weak[j].A || weak[i].A == weak[j].A && weak[i].B < weak[j].B })
-	return W, notes, weak
+	return W, notes, weak, measurement
 }
 
 // ---------- overlap crop ----------

@@ -10,6 +10,7 @@ import (
 	"gioui.org/gpu/headless"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/paint"
 	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
@@ -23,6 +24,15 @@ func TestShot(t *testing.T) {
 		t.Skip("set SHOT")
 	}
 	sz := image.Pt(1600, 200)
+	if os.Getenv("SHOTDIAG") != "" {
+		sz = image.Pt(1600, 1000)
+		if os.Getenv("SHOTSMALL") != "" {
+			sz = image.Pt(1200, 700)
+		}
+	}
+	if os.Getenv("SHOTRESTORE") != "" || os.Getenv("SHOTGRADIENT") != "" {
+		sz = image.Pt(1200, 750)
+	}
 	w, err := headless.NewWindow(sz.X, sz.Y)
 	if err != nil {
 		t.Skip(err)
@@ -33,6 +43,87 @@ func TestShot(t *testing.T) {
 	u := &ui{th: th, rows: 2, cols: 2, tiles: map[cell]*tileState{}, points: map[cellPair][]PointPair{}, pairBtns: map[cellPair]*widget.Clickable{}}
 	u.link.Value, u.chAlign.Value, u.lfit.Value, u.bgEq.Value = true, true, true, true
 	u.overlapSl.Value = 15.0 / maxOverlap
+	if os.Getenv("SHOTRESTORE") != "" {
+		m := psfTestTile([]float64{2.2, 2.1, 2.3})
+		model, err := estimateRestoration(m)
+		spatial := os.Getenv("SHOTSPATIAL") != ""
+		if spatial {
+			m = ellipticalTestImage(true)
+			model, err = estimateSpatialRestoration(m)
+		}
+		coma := os.Getenv("SHOTCOMA") != ""
+		if coma {
+			spatial = true
+			m = comaTestImage()
+			model, err = estimateComaRestoration(m)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := restorationParams{5, .35}
+		region := image.Rect(0, 0, m.W, m.H)
+		if spatial {
+			region = restorationPreviewRect(m, model.stars, nil)
+		}
+		before := cropPixels(m, region)
+		var out *Img
+		if spatial {
+			out = restoreSpatialRegion(m, model, p, region, nil)
+		} else {
+			out = restoreImage(m, model, p, nil)
+		}
+		note, err := assessRestorationModel(before, out, model, region.Min)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pv := restorationPreviews(before, out)
+		u.result, u.view, u.stretch.Value = m, 5, true
+		u.restoration = restorationState{source: m, model: model, modelValid: true, hasPreview: true, approved: true, params: p, cachedParams: p, region: region, note: "Проба прошла проверку. " + note, panels: [2]panel{{needFit: true}, {needFit: true}}, spatial: spatial, cachedSpatial: spatial}
+		u.restoration.coma, u.restoration.cachedComa = coma, coma
+		if spatial {
+			u.restoration.psfMap = paint.NewImageOp(spatialPSFImage(model.spatial))
+			u.restoration.mapPanel.needFit = true
+			u.restoration.showMap = os.Getenv("SHOTPSFMAP") != ""
+		}
+		for side := range pv {
+			for mode, img := range pv[side] {
+				u.restoration.images[side][mode] = paint.NewImageOp(img)
+			}
+		}
+	}
+	if os.Getenv("SHOTGRADIENT") != "" {
+		m := gradientTestImage()
+		g, err := estimateGradient(m, [400]bool{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pv, modelImg := gradientPreviews(m, g, [400]bool{})
+		u.result, u.view, u.stretch.Value = m, 6, true
+		u.gradient = gradientState{source: m, model: g, valid: true, note: g.note, showModel: true, modelImage: paint.NewImageOp(modelImg), panels: [2]panel{{needFit: true}, {needFit: true}}}
+		for side := range pv {
+			for mode, img := range pv[side] {
+				u.gradient.images[side][mode] = paint.NewImageOp(img)
+			}
+		}
+	}
+	if os.Getenv("SHOTDIAG") != "" {
+		d := tileDiagnostic{name: "[1,1] — проверка диагностики"}
+		if os.Getenv("SHOTPSF") != "" {
+			u.psfMatch.Value = true
+			d.psfNote = "PSF: ядра согласованы до 6.28 px мозаики; более резкие каналы сглажены\nR 6.11 → 6.23 px (σ 0.61 px исходника, N=3228); G 5.90 → 6.32 px (σ 0.91 px исходника, N=3121); B 5.87 → 6.36 px (σ 0.94 px исходника, N=2419)"
+		}
+		for i := range d.bins {
+			if i == 0 {
+				continue
+			} // explicitly show an area without overlap measurements
+			d.bins[i] = fieldBin{count: 25, dx: float64(i) * .6, dy: -.5, square: float64(i) * 2, fwhm: []float64{4 + float64(i)*.2}, ellipticity: []float64{.1}}
+		}
+		for c := range d.maps {
+			d.maps[c] = paint.NewImageOp(diagnosticImage(d, c))
+		}
+		u.diagnostics = fieldDiagnostics{tiles: []tileDiagnostic{d}, matchCount: 245, rms: .56, validationN: 49, validationRMS: .57, modelNote: extraLensNote(.803, .791, false)}
+		u.diagPanels, u.view = [2]panel{{needFit: true}, {needFit: true}}, 4
+	}
 	if os.Getenv("SHOTRES") != "" {
 		u.result = newImg(1, 1, 1)
 	}

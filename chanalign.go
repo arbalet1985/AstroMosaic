@@ -12,8 +12,28 @@ import (
 // rotation) fitted to the per-channel star centroids, so the stars keep their real profile. It
 // returns m itself, and no note, when there is nothing to correct.
 func alignChannels(m *Img) (*Img, string) {
+	return applyChannelAlignment(m, measureChromatism(m))
+}
+
+const channelAlignThreshold = 0.3
+
+// channelAlignment is the exact output-to-source sampling map used by the correction.
+type channelAlignment struct {
+	Map                      Aff
+	Stars                    int
+	MaxShift, MedianResidual float64
+	Valid                    bool
+}
+
+type chromatism struct {
+	W, H     int
+	Channels [2]channelAlignment // R, B; green is the reference
+}
+
+func measureChromatism(m *Img) chromatism {
+	report := chromatism{W: m.W, H: m.H}
 	if m.C < 3 {
-		return m, ""
+		return report
 	}
 	const ref = 1 // green
 	stars := detectStars(m)
@@ -30,11 +50,9 @@ func alignChannels(m *Img) (*Img, string) {
 		}
 	}
 	if len(pts) < 30 {
-		return m, ""
+		return report
 	}
-	out := m
-	var parts []string
-	for _, c := range []int{0, 2} {
+	for ci, c := range []int{0, 2} {
 		var src, dst [][2]float64 // green → channel c
 		for _, p := range pts {
 			src, dst = append(src, [2]float64{p[ref].x, p[ref].y}), append(dst, [2]float64{p[c].x, p[c].y})
@@ -48,7 +66,22 @@ func alignChannels(m *Img) (*Img, string) {
 			x, y := A.apply(q[0], q[1])
 			worst = math.Max(worst, math.Hypot(x-q[0], y-q[1]))
 		}
-		if worst < 0.3 {
+		residuals := make([]float64, len(src))
+		for i, p := range src {
+			x, y := A.apply(p[0], p[1])
+			residuals[i] = math.Hypot(x-dst[i][0], y-dst[i][1])
+		}
+		report.Channels[ci] = channelAlignment{Map: A, Stars: n, MaxShift: worst, MedianResidual: median(residuals), Valid: true}
+	}
+	return report
+}
+
+func applyChannelAlignment(m *Img, report chromatism) (*Img, string) {
+	out := m
+	var parts []string
+	for ci, c := range []int{0, 2} {
+		fit := report.Channels[ci]
+		if !fit.Valid || fit.MaxShift < channelAlignThreshold {
 			continue // already aligned: a fraction of a pixel shows no fringe, and fit noise is ~0.1 px
 		}
 		if out == m {
@@ -56,8 +89,8 @@ func alignChannels(m *Img) (*Img, string) {
 			out.Hdr, out.BottomUp = m.Hdr, m.BottomUp
 			copy(out.Pix, m.Pix)
 		}
-		resampleChannel(m, out, c, A)
-		parts = append(parts, fmt.Sprintf("%s до %.1f px (%d звёзд)", []string{"R", "G", "B"}[c], worst, n))
+		resampleChannel(m, out, c, fit.Map)
+		parts = append(parts, fmt.Sprintf("%s до %.1f px (%d звёзд)", []string{"R", "G", "B"}[c], fit.MaxShift, fit.Stars))
 	}
 	if len(parts) == 0 {
 		return m, ""
