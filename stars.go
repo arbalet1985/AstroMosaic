@@ -76,10 +76,21 @@ func detectStars(m *Img) []star {
 // matchStars pairs stars of tile b with stars of tile a. t maps b's pixels into a's and may be off
 // by up to radius px; the result is refined by translation voting and nearest-neighbour fits.
 func matchStars(sa, sb []star, wa, ha, wb, hb int, t Aff, radius float64) []PointPair {
+	return matchStarsMapped(sa, sb, wa, ha, wb, hb, t.apply, radius)
+}
+
+// predict may include SIP and the exact change of TAN plane. Only a small
+// residual similarity is fitted; the nonlinear sky map stays in every iteration.
+func matchStarsMapped(sa, sb []star, wa, ha, wb, hb int, predict func(float64, float64) (float64, float64), radius float64) []PointPair {
+	t := identity
+	project := func(x, y float64) (float64, float64) { u, v := predict(x, y); return t.apply(u, v) }
 	// b's footprint in a, grown by radius
 	x0, y0, x1, y1 := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
 	for _, p := range [][2]float64{{0, 0}, {float64(wb), 0}, {0, float64(hb)}, {float64(wb), float64(hb)}} {
-		x, y := t.apply(p[0], p[1])
+		x, y := project(p[0], p[1])
+		if !finitePoint(x, y) {
+			continue
+		}
 		x0, y0, x1, y1 = math.Min(x0, x), math.Min(y0, y), math.Max(x1, x), math.Max(y1, y)
 	}
 	const keep = 300
@@ -90,7 +101,7 @@ func matchStars(sa, sb []star, wa, ha, wb, hb int, t Aff, radius float64) []Poin
 		}
 	}
 	for _, s := range sb {
-		x, y := t.apply(s.x, s.y)
+		x, y := project(s.x, s.y)
 		if len(B) < keep && x > -radius && y > -radius && x < float64(wa)+radius && y < float64(ha)+radius {
 			B = append(B, [2]float64{s.x, s.y})
 		}
@@ -105,7 +116,7 @@ func matchStars(sa, sb []star, wa, ha, wb, hb int, t Aff, radius float64) []Poin
 	votes := make([]int32, nb*nb)
 	idx := func(d float64) int { return int((d + radius) / bin) }
 	for _, q := range B {
-		x, y := t.apply(q[0], q[1])
+		x, y := project(q[0], q[1])
 		for _, p := range A {
 			dx, dy := p[0]-x, p[1]-y
 			if math.Abs(dx) < radius && math.Abs(dy) < radius {
@@ -125,7 +136,7 @@ func matchStars(sa, sb []star, wa, ha, wb, hb int, t Aff, radius float64) []Poin
 	bx, by := best%nb, best/nb
 	var mx, my, cnt float64
 	for _, q := range B {
-		x, y := t.apply(q[0], q[1])
+		x, y := project(q[0], q[1])
 		for _, p := range A {
 			dx, dy := p[0]-x, p[1]-y
 			if math.Abs(dx) < radius && math.Abs(dy) < radius && abs(idx(dx)-bx) <= 1 && abs(idx(dy)-by) <= 1 {
@@ -143,7 +154,7 @@ func matchStars(sa, sb []star, wa, ha, wb, hb int, t Aff, radius float64) []Poin
 		used := make([]bool, len(A))
 		var ss float64
 		for _, q := range B {
-			x, y := t.apply(q[0], q[1])
+			x, y := project(q[0], q[1])
 			bi, bd := -1, tol*tol
 			for i, p := range A {
 				if d := (p[0]-x)*(p[0]-x) + (p[1]-y)*(p[1]-y); !used[i] && d < bd {
@@ -162,7 +173,8 @@ func matchStars(sa, sb []star, wa, ha, wb, hb int, t Aff, radius float64) []Poin
 		src := make([][2]float64, len(pairs))
 		dst := make([][2]float64, len(pairs))
 		for i, p := range pairs {
-			src[i], dst[i] = p.B, p.A
+			src[i][0], src[i][1] = predict(p.B[0], p.B[1])
+			dst[i] = p.A
 		}
 		t = fitSimilarity(src, dst)
 		tol = math.Min(4, math.Max(1.5, 3*math.Sqrt(ss/float64(len(pairs)))))

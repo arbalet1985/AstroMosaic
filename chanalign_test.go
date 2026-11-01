@@ -58,6 +58,19 @@ func TestAlignChannels(t *testing.T) {
 	rmap := Aff{1 / k, 0, 300*(1-1/k) - 0.5, 0, 1 / k, 250*(1-1/k) + 0.3}
 	m, _ := rgbStars(600, 500, rmap)
 	before := chanOffset(m)
+	report := measureChromatism(m)
+	fit := report.Channels[0]
+	if !fit.Valid || fit.Stars < 30 || fit.MaxShift < 1 || fit.MedianResidual > 0.15 {
+		t.Fatalf("invalid chromatism measurement: %+v", fit)
+	}
+	want := rmap.inv()
+	for _, p := range [][2]float64{{0, 0}, {599, 499}, {300, 250}} {
+		x, y := fit.Map.apply(p[0], p[1])
+		X, Y := want.apply(p[0], p[1])
+		if math.Hypot(x-X, y-Y) > 0.15 {
+			t.Fatalf("map does not recover source sampling at %v: (%f,%f), want (%f,%f)", p, x, y, X, Y)
+		}
+	}
 	out, note := alignChannels(m)
 	after := chanOffset(out)
 	t.Log(note, before, after)
