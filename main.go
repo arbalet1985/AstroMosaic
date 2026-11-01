@@ -119,12 +119,13 @@ type ui struct {
 	psfModeBtn                  widget.Clickable
 	restoration                 restorationState
 	gradient                    gradientState
+	colorHalo                   colorHaloState
 	flat                        flatState
 	more                        bool       // «Дополнительно» row shown
 	weak                        []cellPair // neighbours the stars could not tie together
 	stretch, link               widget.Bool
 	format                      int // index in saveFormats: the type last picked in the save dialog
-	view                        int // 0 grid, 1 points, 2 result, 3 chromatism, 4 diagnostics, 5 restoration, 6 gradient
+	view                        int // 0 grid, 1 points, 2 result, 3 chromatism, 4 diagnostics, 5 restoration, 6 gradient, 7 colour halos
 
 	rows, cols int
 	tiles      map[cell]*tileState
@@ -231,6 +232,8 @@ func (u *ui) layout(gtx layout.Context) {
 					return u.restorationView(gtx)
 				case 6:
 					return u.gradientView(gtx)
+				case 7:
+					return u.colorHaloView(gtx)
 				}
 				return u.gridView(gtx)
 			}
@@ -270,6 +273,7 @@ func (u *ui) layout(gtx layout.Context) {
 func (u *ui) handle(gtx layout.Context) {
 	u.handleRestoration(gtx)
 	u.handleGradient(gtx)
+	u.handleColorHalos(gtx)
 	u.handleFlat(gtx)
 	if u.diagBtn.Clicked(gtx) {
 		u.view = 4
@@ -676,6 +680,8 @@ func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
 	u.gradient.valid = false
 	u.gradient.images = [2][nPrev]paint.ImageOp{}
 	u.gradient.modelImage = paint.ImageOp{}
+	u.colorHalo.source, u.colorHalo.candidate = nil, nil
+	u.colorHalo.images = [2][nPrev]paint.ImageOp{}
 	u.result = m
 	for i, p := range pv {
 		u.resPrev[i] = paint.NewImageOp(p)
@@ -854,7 +860,13 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 				return material.Button(th, &u.flat.clear, "Без flat").Layout(gtx)
 			}),
 		}
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(row1), row(row2), row(row3))
+		row4 := []layout.FlexChild{layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if u.busy || u.result == nil || u.result.C != 3 {
+				gtx = gtx.Disabled()
+			}
+			return material.Button(th, &u.colorHalo.open, "Цветные ореолы…").Layout(gtx)
+		})}
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(row1), row(row2), row(row3), row(row4))
 	})
 }
 
