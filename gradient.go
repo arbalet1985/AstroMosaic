@@ -20,6 +20,7 @@ type gradientModel struct {
 	coeff   [][6]float64
 	level   []float64
 	note    string
+	table   [][]float64 // optional smooth RBF surface sampled on a 65×65 lattice
 }
 
 func gradientBasis(x, y float64, w, h int) []float64 {
@@ -221,7 +222,7 @@ func subtractGradient(m *Img, g gradientModel) *Img {
 				for c := 0; c < m.C; c++ {
 					i := c*n + y*m.W + x
 					if valid {
-						out.Pix[i] = m.Pix[i] - float32(gradientValue(g.coeff[c], float64(x), float64(y), m.W, m.H)-g.level[c])
+						out.Pix[i] = m.Pix[i] - float32(g.surface(c, float64(x), float64(y))-g.level[c])
 					} else {
 						v := m.Pix[i]
 						if !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {

@@ -18,6 +18,7 @@ type restorationModel struct {
 	luminance   *restorationChannel
 	spatial     *spatialPSF
 	patchKernel *ellipticalKernel
+	colorModels []restorationModel
 }
 
 // Sample background differences, excluding bright structures. The offset makes
@@ -113,6 +114,9 @@ func restorationLuminance(m *Img) *Img {
 
 func restorationRadius(model restorationModel, p restorationParams) int {
 	r := 1
+	for _, sub := range model.colorModels {
+		r = max(r, restorationRadius(sub, p))
+	}
 	for _, c := range model.channels {
 		r = max(r, int(math.Ceil(4*p.fraction*c.fwhm/gaussianFWHM)))
 	}
@@ -121,7 +125,7 @@ func restorationRadius(model restorationModel, p restorationParams) int {
 	}
 	if model.spatial != nil {
 		if model.spatial.coma {
-			r = max(r, comaRadius)
+			r = max(r, model.spatial.radius)
 		}
 		for _, node := range model.spatial.nodes {
 			if node.valid {
@@ -232,6 +236,9 @@ func restorePlaneOperators(src []float32, w, h int, model restorationChannel, p 
 }
 
 func restoreImage(m *Img, model restorationModel, p restorationParams, progress func(int, int)) *Img {
+	if len(model.colorModels) > 0 {
+		return restoreColorRegion(m, model, p, image.Rect(0, 0, m.W, m.H), progress)
+	}
 	if model.spatial != nil {
 		return restoreSpatialRegion(m, model, p, image.Rect(0, 0, m.W, m.H), progress)
 	}

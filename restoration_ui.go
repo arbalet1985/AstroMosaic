@@ -15,6 +15,9 @@ import (
 
 type restorationState struct {
 	open, preview, apply, iterations, strength, mode, mapBtn widget.Clickable
+	colorBtn, mapChannelBtn                                  widget.Clickable
+	profile, cachedProfile, independent, cachedIndependent   bool
+	mapChannel                                               int
 	spatial, cachedSpatial, showMap                          bool
 	coma, cachedComa                                         bool
 	psfMap                                                   paint.ImageOp
@@ -76,13 +79,29 @@ func (u *ui) handleRestoration(gtx layout.Context) {
 			s.coma = false
 		} else if !s.coma {
 			s.coma = true
+		} else if !s.profile {
+			s.profile = true
 		} else {
+			s.profile = false
 			s.spatial = false
 			s.coma = false
 		}
 		s.modelValid = false
 		s.approved = false
 		s.showMap = false
+	}
+	if s.colorBtn.Clicked(gtx) && !u.busy && u.result != nil && u.result.C == 3 {
+		s.independent = !s.independent
+		s.modelValid = false
+		s.approved = false
+		s.showMap = false
+	}
+	if s.mapChannelBtn.Clicked(gtx) && s.modelValid && len(s.model.colorModels) > 0 {
+		s.mapChannel = (s.mapChannel + 1) % 3
+		if g := s.model.colorModels[s.mapChannel].spatial; g != nil {
+			s.psfMap = paint.NewImageOp(spatialPSFImage(g))
+			s.mapPanel.needFit = true
+		}
 	}
 	if s.mapBtn.Clicked(gtx) && s.modelValid && s.model.spatial != nil {
 		s.showMap = !s.showMap
@@ -91,7 +110,7 @@ func (u *ui) handleRestoration(gtx layout.Context) {
 	if s.preview.Clicked(gtx) && !u.busy && u.result != nil {
 		u.previewRestoration()
 	}
-	if s.apply.Clicked(gtx) && !u.busy && s.approved && s.source == u.result && s.cachedParams == s.settings() && s.cachedSpatial == s.spatial && s.cachedComa == s.coma {
+	if s.apply.Clicked(gtx) && !u.busy && s.approved && s.source == u.result && s.cachedParams == s.settings() && s.cachedSpatial == s.spatial && s.cachedComa == s.coma && s.cachedProfile == s.profile && s.cachedIndependent == s.independent {
 		u.applyRestoration()
 	}
 }
@@ -125,6 +144,7 @@ func (u *ui) previewRestoration() {
 	source, p := u.result, s.settings()
 	spatial := s.spatial
 	coma := s.coma
+	profile, independent := s.profile, s.independent
 	var selection *frame
 	if u.sel != nil {
 		f := *u.sel
@@ -136,13 +156,7 @@ func (u *ui) previewRestoration() {
 	go func() {
 		var err error
 		if !valid {
-			if spatial && coma {
-				model, err = estimateComaRestoration(source)
-			} else if spatial {
-				model, err = estimateSpatialRestoration(source)
-			} else {
-				model, err = estimateRestoration(source)
-			}
+			model, err = estimateRestorationMode(source, spatial, coma, profile, independent)
 		}
 		if err != nil {
 			u.post(func() {
@@ -193,6 +207,8 @@ func (u *ui) previewRestoration() {
 			s.region, s.cachedParams, s.approved, s.hasPreview, s.note = region, p, approved, true, note
 			s.cachedSpatial = spatial
 			s.cachedComa = coma
+			s.cachedProfile, s.cachedIndependent = profile, independent
+			s.mapChannel = 0
 			if psfMap != nil {
 				s.psfMap = paint.NewImageOp(psfMap)
 			}
@@ -267,10 +283,17 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 	if s.coma {
 		modeLabel = "PSF: асимметричная кома ▾"
 	}
+	if s.profile {
+		modeLabel = "PSF: эмпирическая 33×33 ▾"
+	}
+	colorLabel := "Цвет: общая яркость ▾"
+	if s.independent {
+		colorLabel = "Цвет: отдельные PSF ▾"
+	}
 	return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(material.Body1(u.th, "Деконволюция — отдельная операция над результатом").Layout),
-			layout.Rigid(material.Body2(u.th, "Проба до 768×768 px: центр рамки результата либо область со звёздами. Слева — до, справа — после; растяжка общая.\nВ RGB сохраняются соотношения цветов. Для асимметричных хвостов выберите модель комы, подтверждаемую по звёздам.\nДля сохранения обработки нажмите «Применить ко всему результату».").Layout),
+			layout.Rigid(material.Body2(u.th, "Проба до 768×768 px: центр рамки результата либо область со звёздами. Слева — до, справа — после; растяжка общая.\nПо умолчанию RGB сохраняет отношения цветов. Отдельные PSF каналов исправляют разное размытие и могут менять цвет деталей.\nДля сохранения обработки нажмите «Применить ко всему результату».").Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				if u.busy {
 					gtx = gtx.Disabled()
@@ -280,12 +303,18 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 					layout.Rigid(material.Button(u.th, &s.strength, strengthLabel).Layout),
 					layout.Rigid(material.Button(u.th, &s.preview, "Пересчитать пробу").Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if !s.approved || s.source != u.result || p != s.cachedParams || s.spatial != s.cachedSpatial || s.coma != s.cachedComa {
+						if !s.approved || s.source != u.result || p != s.cachedParams || s.spatial != s.cachedSpatial || s.coma != s.cachedComa || s.profile != s.cachedProfile || s.independent != s.cachedIndependent {
 							gtx = gtx.Disabled()
 						}
 						return material.Button(u.th, &s.apply, "Применить ко всему результату").Layout(gtx)
 					}),
 					layout.Rigid(material.Button(u.th, &s.mode, modeLabel).Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if u.result.C != 3 {
+							gtx = gtx.Disabled()
+						}
+						return material.Button(u.th, &s.colorBtn, colorLabel).Layout(gtx)
+					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if !s.modelValid || s.source != u.result || s.model.spatial == nil {
 							gtx = gtx.Disabled()
@@ -298,7 +327,7 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 				note := s.note
 				if s.source != u.result {
 					note = "Результат изменился — рассчитайте новую пробу."
-				} else if s.hasPreview && (p != s.cachedParams || s.spatial != s.cachedSpatial || s.coma != s.cachedComa) {
+				} else if s.hasPreview && (p != s.cachedParams || s.spatial != s.cachedSpatial || s.coma != s.cachedComa || s.profile != s.cachedProfile || s.independent != s.cachedIndependent) {
 					note = "Параметры изменены — пересчитайте пробу перед применением."
 				}
 				return material.Body2(u.th, note).Layout(gtx)
@@ -309,8 +338,20 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 					if s.model.spatial.coma {
 						legend = "Сетка 4×4 всего результата; RGB — общая яркость. Профили 17×17 px показаны с увеличением и нелинейной яркостью.\nN — число изолированных звёзд; A — асимметрия. NO COMA — асимметрия не подтверждена. «Карта PSF» возвращает пробу."
 					}
+					if s.profile {
+						legend = "Эмпирические профили 33×33 px: крылья/дефокус. N — число изолированных звёзд, A — асимметрия. NO MODEL — нет проверенной модели."
+					}
+					if s.independent {
+						legend = "Отдельная PSF канала " + channelName(s.mapChannel, 3) + ". " + legend
+					}
 					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 						layout.Rigid(material.Body2(u.th, legend).Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							if !s.independent {
+								return layout.Dimensions{}
+							}
+							return material.Button(u.th, &s.mapChannelBtn, "Канал PSF: "+channelName(s.mapChannel, 3)+" ▾").Layout(gtx)
+						}),
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 							return u.zoomView(gtx, &s.mapPanel, s.psfMap, func(_ f32.Point, _ pointer.Buttons) {}, nil)
 						}),

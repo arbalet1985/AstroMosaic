@@ -45,6 +45,9 @@ func TestShot(t *testing.T) {
 	u.overlapSl.Value = 15.0 / maxOverlap
 	if os.Getenv("SHOTRESTORE") != "" {
 		m := psfTestTile([]float64{2.2, 2.1, 2.3})
+		if os.Getenv("SHOTSINGLE") != "" {
+			u.tiles[cell{0, 0}] = &tileState{img: m}
+		}
 		model, err := estimateRestoration(m)
 		spatial := os.Getenv("SHOTSPATIAL") != ""
 		if spatial {
@@ -56,6 +59,16 @@ func TestShot(t *testing.T) {
 			spatial = true
 			m = comaTestImage()
 			model, err = estimateComaRestoration(m)
+		}
+		profile := os.Getenv("SHOTPROFILE") != ""
+		if profile {
+			spatial, coma = true, true
+			m = profileTestImage(false)
+			model, err = estimateProfileRestoration(m)
+		}
+		independent := os.Getenv("SHOTCOLOR") != ""
+		if independent {
+			model, err = estimateRestorationMode(m, spatial, coma, profile, true)
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -80,6 +93,8 @@ func TestShot(t *testing.T) {
 		u.result, u.view, u.stretch.Value = m, 5, true
 		u.restoration = restorationState{source: m, model: model, modelValid: true, hasPreview: true, approved: true, params: p, cachedParams: p, region: region, note: "Проба прошла проверку. " + note, panels: [2]panel{{needFit: true}, {needFit: true}}, spatial: spatial, cachedSpatial: spatial}
 		u.restoration.coma, u.restoration.cachedComa = coma, coma
+		u.restoration.profile, u.restoration.cachedProfile = profile, profile
+		u.restoration.independent, u.restoration.cachedIndependent = independent, independent
 		if spatial {
 			u.restoration.psfMap = paint.NewImageOp(spatialPSFImage(model.spatial))
 			u.restoration.mapPanel.needFit = true

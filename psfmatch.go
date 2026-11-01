@@ -18,6 +18,7 @@ type psfMatchReport struct {
 	applied  bool
 	note     string
 	channels [][]psfChannel
+	field    bool
 }
 
 func channelName(c, C int) string {
@@ -172,6 +173,10 @@ func (r psfMatchReport) tileNote(i int) string {
 	}
 	var parts []string
 	for c, p := range r.channels[i] {
+		if r.field {
+			parts = append(parts, fmt.Sprintf("%s моментная ширина %.2f→%.2f px мозаики; пространственные ядра", channelName(c, len(r.channels[i])), p.mosaic, p.after))
+			continue
+		}
 		parts = append(parts, fmt.Sprintf("%s %.2f → %.2f px (σ %.2f px исходника, N=%d)", channelName(c, len(r.channels[i])), p.mosaic, p.after, p.sigma, p.n))
 	}
 	return r.note + "\n" + strings.Join(parts, "; ")
