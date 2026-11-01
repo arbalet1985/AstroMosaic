@@ -19,10 +19,13 @@ const channelAlignThreshold = 0.3
 
 // channelAlignment is the exact output-to-source sampling map used by the correction.
 type channelAlignment struct {
-	Map                      Aff
-	Stars                    int
-	MaxShift, MedianResidual float64
-	Valid                    bool
+	Map                               Aff
+	Stars                             int
+	MaxShift, MedianResidual          float64
+	Valid                             bool
+	Radial, CX, CY, Scale             float64
+	ValidationBefore, ValidationAfter float64
+	Residuals                         []chromResidual
 }
 
 type chromatism struct {
@@ -61,17 +64,22 @@ func measureChromatism(m *Img) chromatism {
 		if !ok {
 			continue
 		}
-		var worst float64 // largest shift at a tile corner
-		for _, q := range [][2]float64{{0, 0}, {float64(m.W - 1), 0}, {0, float64(m.H - 1)}, {float64(m.W - 1), float64(m.H - 1)}} {
-			x, y := A.apply(q[0], q[1])
-			worst = math.Max(worst, math.Hypot(x-q[0], y-q[1]))
+		fit := selectChromModel(src, dst, float64(m.W), float64(m.H), channelAlignment{Map: A, Stars: n, Valid: true})
+		var worst float64
+		for iy := 0; iy <= 8; iy++ {
+			for ix := 0; ix <= 8; ix++ {
+				x, y := float64(ix)*float64(m.W-1)/8, float64(iy)*float64(m.H-1)/8
+				u, v := fit.apply(x, y)
+				worst = math.Max(worst, math.Hypot(u-x, v-y))
+			}
 		}
 		residuals := make([]float64, len(src))
 		for i, p := range src {
-			x, y := A.apply(p[0], p[1])
+			x, y := fit.apply(p[0], p[1])
 			residuals[i] = math.Hypot(x-dst[i][0], y-dst[i][1])
 		}
-		report.Channels[ci] = channelAlignment{Map: A, Stars: n, MaxShift: worst, MedianResidual: median(residuals), Valid: true}
+		fit.MaxShift, fit.MedianResidual = worst, median(residuals)
+		report.Channels[ci] = fit
 	}
 	return report
 }
@@ -89,8 +97,11 @@ func applyChannelAlignment(m *Img, report chromatism) (*Img, string) {
 			out.Hdr, out.BottomUp = m.Hdr, m.BottomUp
 			copy(out.Pix, m.Pix)
 		}
-		resampleChannel(m, out, c, fit.Map)
+		resampleChannelMapped(m, out, c, fit.apply)
 		parts = append(parts, fmt.Sprintf("%s до %.1f px (%d звёзд)", []string{"R", "G", "B"}[c], fit.MaxShift, fit.Stars))
+		if fit.Radial != 0 {
+			parts = append(parts, fmt.Sprintf("радиальная: проверка %.3f→%.3f px", fit.ValidationBefore, fit.ValidationAfter))
+		}
 	}
 	if len(parts) == 0 {
 		return m, ""
@@ -190,6 +201,10 @@ func fitAffine(src, dst [][2]float64, w, h float64) (Aff, int, bool) {
 // resampleChannel writes channel c of out as channel c of m sampled at A(x, y), with Lanczos-4
 // kept within the 2×2 nearest pixels so stars get no ringing halo.
 func resampleChannel(m, out *Img, c int, A Aff) {
+	resampleChannelMapped(m, out, c, A.apply)
+}
+
+func resampleChannelMapped(m, out *Img, c int, mapping func(float64, float64) (float64, float64)) {
 	const taps = 4
 	n := m.W * m.H
 	p, q := m.Pix[c*n:(c+1)*n], out.Pix[c*n:(c+1)*n]
@@ -199,7 +214,7 @@ func resampleChannel(m, out *Img, c int, A Aff) {
 		var wx, wy [2 * taps]float64
 		for y := lo; y < hi; y++ {
 			for x := 0; x < m.W; x++ {
-				u, v := A.apply(float64(x), float64(y))
+				u, v := mapping(float64(x), float64(y))
 				fx, fy := int(math.Floor(u)), int(math.Floor(v))
 				x0, y0 := fx-taps+1, fy-taps+1
 				var sx, sy float64

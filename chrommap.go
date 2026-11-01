@@ -17,10 +17,12 @@ import (
 )
 
 type chromMapTile struct {
-	name   string
-	report chromatism
-	maps   [2]paint.ImageOp
-	scale  float64
+	name          string
+	report        chromatism
+	maps          [2]paint.ImageOp
+	scale         float64
+	residualMaps  [2]paint.ImageOp
+	residualScale float64
 }
 
 func (u *ui) resetChromPanels() {
@@ -39,20 +41,38 @@ func (u *ui) inspectChromatism() {
 		names[i] = tiles[i].Name + " " + filepath.Base(u.tiles[k].path)
 	}
 	u.busy, u.status = true, "Измеряю хроматизм по звёздам…"
+	flat := u.flat.image
 	go func() {
 		maps := make([]chromMapTile, len(tiles))
 		for i, t := range tiles {
-			r := measureChromatism(t.Img)
+			m := t.Img
+			if flat != nil {
+				calibrated, _, err := applyMasterFlat(m, flat)
+				if err != nil {
+					u.post(func() { u.busy = false; u.status = "Карта: " + err.Error() })
+					return
+				}
+				m = calibrated
+				names[i] += " [master flat]"
+			}
+			r := measureChromatism(m)
 			scale := channelAlignThreshold
 			for _, c := range r.Channels {
 				if c.Valid {
 					scale = math.Max(scale, c.MaxShift)
 				}
 			}
-			maps[i] = chromMapTile{name: names[i], report: r, scale: scale}
+			rs := .3
+			for _, f := range r.Channels {
+				for _, p := range f.Residuals {
+					rs = math.Max(rs, math.Hypot(p.dx, p.dy))
+				}
+			}
+			maps[i] = chromMapTile{name: names[i], report: r, scale: scale, residualScale: rs}
 			for c, fit := range r.Channels {
 				if fit.Valid {
 					maps[i].maps[c] = paint.NewImageOp(chromatismImage(r, c, scale))
+					maps[i].residualMaps[c] = paint.NewImageOp(chromResidualImage(r, c, rs))
 				}
 			}
 		}
@@ -84,7 +104,7 @@ func chromatismImage(r chromatism, channel int, scale float64) *image.RGBA {
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			px, py := float64(x)*float64(r.W-1)/float64(w-1), float64(y)*float64(r.H-1)/float64(h-1)
-			u, v := fit.Map.apply(px, py)
+			u, v := fit.apply(px, py)
 			out.SetRGBA(x, y, chromColor(math.Hypot(u-px, v-py)/scale))
 		}
 	}
@@ -98,7 +118,7 @@ func chromatismImage(r chromatism, channel int, scale float64) *image.RGBA {
 	for y := 30; y < h; y += 60 {
 		for x := 30; x < w; x += 60 {
 			px, py := float64(x)*float64(r.W-1)/float64(w-1), float64(y)*float64(r.H-1)/float64(h-1)
-			u, v := fit.Map.apply(px, py)
+			u, v := fit.apply(px, py)
 			dx, dy := (px-u)*24/scale, (py-v)*24/scale
 			X, Y := float64(x)+dx, float64(y)+dy
 			white := color.RGBA{255, 255, 255, 255}
@@ -118,6 +138,10 @@ func (u *ui) chromatismView(gtx layout.Context) layout.Dimensions {
 		return layout.Center.Layout(gtx, material.Body1(u.th, "Откройте плитки и нажмите «Карта хроматизма»").Layout)
 	}
 	t := u.chromMaps[u.chromIndex]
+	scale := t.scale
+	if u.chromResidual {
+		scale = t.residualScale
+	}
 	return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -135,9 +159,10 @@ func (u *ui) chromatismView(gtx layout.Context) layout.Dimensions {
 						return material.Button(u.th, &u.mapNext, "→").Layout(gtx)
 					}),
 					layout.Flexed(1, material.Body1(u.th, fmt.Sprintf("  %d / %d  %s  (%d×%d)", u.chromIndex+1, len(u.chromMaps), t.name, t.report.W, t.report.H)).Layout),
+					layout.Rigid(material.Button(u.th, &u.chromResidualBtn, "Коррекция / остатки").Layout),
 				)
 			}),
-			layout.Rigid(material.Body2(u.th, "Исходные плитки: аффинная модель R и B относительно G. Коррекция при сшивке: «Совместить каналы», максимум ≥ 0,30 px.\nЦвет: величина смещения; стрелки: направление исправления (увеличено). Карта не показывает размытие и ореолы.").Layout),
+			layout.Rigid(material.Body2(u.th, "Исходные плитки: аффинная модель и проверенная радиальная добавка R/B относительно G. Коррекция при сшивке: «Совместить каналы», максимум ≥0,30 px.\nКарта коррекции: направление исправления. Карта остатков: отложенные звёзды, вектор ошибки ×24/шкала, яркость — её модуль; чёрный — нет проб.").Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(material.Body2(u.th, "0 px  ").Layout),
@@ -150,7 +175,7 @@ func (u *ui) chromatismView(gtx layout.Context) layout.Dimensions {
 						}
 						return (widget.Image{Src: paint.NewImageOp(bar)}).Layout(gtx)
 					}),
-					layout.Rigid(material.Body2(u.th, fmt.Sprintf("  %.2f px; шкала общая для R и B этой плитки", t.scale)).Layout),
+					layout.Rigid(material.Body2(u.th, fmt.Sprintf("  %.2f px; шкала общая для R и B этой плитки", scale)).Layout),
 				)
 			}),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -165,10 +190,18 @@ func (u *ui) chromatismView(gtx layout.Context) layout.Dimensions {
 						if fit.MaxShift >= channelAlignThreshold {
 							state = "выше порога коррекции"
 						}
+						model := "аффинная"
+						if fit.Radial != 0 {
+							model = "аффинная + радиальная"
+						}
+						img := t.maps[c]
+						if u.chromResidual {
+							img = t.residualMaps[c]
+						}
 						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(material.Body2(u.th, fmt.Sprintf("%s: максимум %.2f px; %d звёзд\nМедианная ошибка модели %.3f px; %s", []string{"R → G", "B → G"}[c], fit.MaxShift, fit.Stars, fit.MedianResidual, state)).Layout),
+							layout.Rigid(material.Body2(u.th, fmt.Sprintf("%s: %s; максимум %.2f px; %d звёзд\nОшибка %.3f px; проверка %.3f→%.3f px (N=%d); %s", []string{"R → G", "B → G"}[c], model, fit.MaxShift, fit.Stars, fit.MedianResidual, fit.ValidationBefore, fit.ValidationAfter, len(fit.Residuals), state)).Layout),
 							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								return u.zoomView(gtx, &u.chromPanels[c], t.maps[c], func(_ f32.Point, _ pointer.Buttons) {}, nil)
+								return u.zoomView(gtx, &u.chromPanels[c], img, func(_ f32.Point, _ pointer.Buttons) {}, nil)
 							}),
 						)
 					})

@@ -16,18 +16,20 @@ type comaSample struct {
 }
 
 func psfMoments(p []float64) (cx, cy float64, cov psfCovariance) {
+	side := int(math.Sqrt(float64(len(p))))
+	radius := side / 2
 	var sum float64
 	for i, v := range p {
 		sum += v
-		cx += v * float64(i%comaSide-comaRadius)
-		cy += v * float64(i/comaSide-comaRadius)
+		cx += v * float64(i%side-radius)
+		cy += v * float64(i/side-radius)
 	}
 	if sum <= 0 {
 		return
 	}
 	cx, cy = cx/sum, cy/sum
 	for i, v := range p {
-		x, y := float64(i%comaSide-comaRadius)-cx, float64(i/comaSide-comaRadius)-cy
+		x, y := float64(i%side-radius)-cx, float64(i/side-radius)-cy
 		cov.xx += v * x * x / sum
 		cov.xy += v * x * y / sum
 		cov.yy += v * y * y / sum
@@ -45,6 +47,7 @@ func empiricalAsymmetry(p []float64) float64 {
 }
 
 func normalisePSF(p []float64) []float64 {
+	side := int(math.Sqrt(float64(len(p))))
 	q := append([]float64(nil), p...)
 	for pass := 0; pass < 3; pass++ {
 		var sum float64
@@ -64,13 +67,13 @@ func normalisePSF(p []float64) []float64 {
 		}
 		out := make([]float64, len(q))
 		for i, v := range q {
-			x, y := float64(i%comaSide)-cx, float64(i/comaSide)-cy
+			x, y := float64(i%side)-cx, float64(i/side)-cy
 			ix, iy := int(math.Floor(x)), int(math.Floor(y))
 			fx, fy := x-float64(ix), y-float64(iy)
 			for dy := 0; dy < 2; dy++ {
 				for dx := 0; dx < 2; dx++ {
 					X, Y := ix+dx, iy+dy
-					if X < 0 || Y < 0 || X >= comaSide || Y >= comaSide {
+					if X < 0 || Y < 0 || X >= side || Y >= side {
 						continue
 					}
 					wx, wy := 1-fx, 1-fy
@@ -80,7 +83,7 @@ func normalisePSF(p []float64) []float64 {
 					if dy == 1 {
 						wy = fy
 					}
-					out[Y*comaSide+X] += v * wx * wy
+					out[Y*side+X] += v * wx * wy
 				}
 			}
 		}
@@ -97,17 +100,22 @@ func normalisePSF(p []float64) []float64 {
 }
 
 func measureComaStar(m *Img, c int, s star) (comaSample, bool) {
+	return measureProfileStar(m, c, s, comaRadius)
+}
+
+func measureProfileStar(m *Img, c int, s star, radius int) (comaSample, bool) {
+	side, border := 2*radius+1, radius+3
 	x, y, ok := centroid(m, c, s.x, s.y)
 	if !ok {
 		return comaSample{}, false
 	}
 	ix, iy := int(math.Round(x)), int(math.Round(y))
-	if ix < 11 || iy < 11 || ix >= m.W-11 || iy >= m.H-11 {
+	if ix < border || iy < border || ix >= m.W-border || iy >= m.H-border {
 		return comaSample{}, false
 	}
 	var ring []float64
-	for d := -11; d <= 11; d++ {
-		ring = append(ring, float64(m.at(c, ix+d, iy-11)), float64(m.at(c, ix+d, iy+11)), float64(m.at(c, ix-11, iy+d)), float64(m.at(c, ix+11, iy+d)))
+	for d := -border; d <= border; d++ {
+		ring = append(ring, float64(m.at(c, ix+d, iy-border)), float64(m.at(c, ix+d, iy+border)), float64(m.at(c, ix-border, iy+d)), float64(m.at(c, ix+border, iy+d)))
 	}
 	bg := median(ring)
 	for _, v := range ring {
@@ -119,16 +127,16 @@ func measureComaStar(m *Img, c int, s star) (comaSample, bool) {
 		ring[i] = math.Abs(ring[i] - bg)
 	}
 	noise := math.Max(1e-7, 1.4826*median(ring))
-	p := make([]float64, comaSide*comaSide)
+	p := make([]float64, side*side)
 	var flux, peak float64
-	for dy := -comaRadius; dy <= comaRadius; dy++ {
-		for dx := -comaRadius; dx <= comaRadius; dx++ {
+	for dy := -radius; dy <= radius; dy++ {
+		for dx := -radius; dx <= radius; dx++ {
 			value := float64(bilinear(m, c, x+float64(dx), y+float64(dy)))
 			if value == 0 || !finitePoint(value, 0) {
 				return comaSample{}, false
 			}
 			v := value - bg
-			p[(dy+comaRadius)*comaSide+dx+comaRadius] = v
+			p[(dy+radius)*side+dx+radius] = v
 			flux += v
 			peak = math.Max(peak, v)
 		}
@@ -155,7 +163,7 @@ func measureComaStar(m *Img, c int, s star) (comaSample, bool) {
 	}
 	_, _, cov := psfMoments(positive)
 	major, minor, _ := cov.axes()
-	if minor < .6 || major > 4.5 {
+	if minor < .6 || major > float64(radius)/2+.5 {
 		return comaSample{}, false
 	}
 	// The PSF used for stacking remains signed until the robust median is formed.
@@ -163,7 +171,7 @@ func measureComaStar(m *Img, c int, s star) (comaSample, bool) {
 }
 
 func medianPSF(samples []comaSample) []float64 {
-	p := make([]float64, comaSide*comaSide)
+	p := make([]float64, len(samples[0].psf))
 	for i := range p {
 		v := make([]float64, len(samples))
 		for j, s := range samples {
@@ -183,15 +191,27 @@ func psfDistance(a, b []float64) float64 {
 }
 
 func estimateComaRestoration(m *Img) (restorationModel, error) {
+	return estimateEmpiricalRestoration(m, false)
+}
+
+func estimateProfileRestoration(m *Img) (restorationModel, error) {
+	return estimateEmpiricalRestoration(m, true)
+}
+
+func estimateEmpiricalRestoration(m *Img, profile bool) (restorationModel, error) {
+	radius := comaRadius
+	if profile {
+		radius = 16
+	}
 	if m.C != 1 && m.C != 3 {
 		return restorationModel{}, fmt.Errorf("PSF комы поддерживает ч/б и RGB")
 	}
-	stars := detectStars(m)
+	stars := detectEmpiricalStars(m, profile)
 	model := restorationModel{stars: stars[:min(len(stars), 4000)], channels: make([]restorationChannel, m.C)}
 	for c := 0; c < m.C; c++ {
 		var widths []float64
 		for _, s := range model.stars {
-			p, ok := measureComaStar(m, c, s)
+			p, ok := measureProfileStar(m, c, s, radius)
 			if ok {
 				widths = append(widths, p.width)
 			}
@@ -213,7 +233,7 @@ func estimateComaRestoration(m *Img) (restorationModel, error) {
 	for i, s := range model.stars {
 		isolated := true
 		for j, q := range model.stars {
-			if i != j && math.Hypot(s.x-q.x, s.y-q.y) < 2*comaRadius+4 {
+			if i != j && math.Hypot(s.x-q.x, s.y-q.y) < 2*float64(radius)+4 {
 				isolated = false
 				break
 			}
@@ -221,13 +241,13 @@ func estimateComaRestoration(m *Img) (restorationModel, error) {
 		if !isolated {
 			continue
 		}
-		p, ok := measureComaStar(plane, 0, s)
+		p, ok := measureProfileStar(plane, 0, s, radius)
 		if !ok {
 			continue
 		}
 		cells[diagnosticBin(s.x, s.y, m)] = append(cells[diagnosticBin(s.x, s.y, m)], p)
 	}
-	g := &spatialPSF{w: m.W, h: m.H, coma: true}
+	g := &spatialPSF{w: m.W, h: m.H, coma: true, profile: profile, radius: radius}
 	valid := 0
 	rows, cols := [4]bool{}, [4]bool{}
 	for i, samples := range cells {
@@ -248,12 +268,15 @@ func estimateComaRestoration(m *Img) (restorationModel, error) {
 			continue
 		}
 		asym := empiricalAsymmetry(p)
-		if asym < .04 {
+		if !profile && asym < .04 {
 			continue
 		}
 		sym := make([]float64, len(p))
 		for j := range p {
 			sym[j] = .5 * (p[j] + p[len(p)-1-j])
+		}
+		if profile {
+			sym = gaussianProfile(p)
 		}
 		var empiricalError, symmetricError float64
 		for _, s := range validation {
@@ -280,7 +303,7 @@ func estimateComaRestoration(m *Img) (restorationModel, error) {
 		}
 	}
 	if valid < 4 || nr < 2 || nc < 2 {
-		return model, fmt.Errorf("кома не подтверждена: нужно ≥4 ячеек с ≥12 изолированными звёздами и улучшением на отложенных звёздах")
+		return model, fmt.Errorf("эмпирическая PSF не подтверждена: нужно ≥4 ячеек с ≥12 изолированными звёздами и улучшением на отложенных звёздах")
 	}
 	model.spatial = g
 	return model, nil
@@ -293,7 +316,7 @@ func (g *spatialPSF) empiricalAt(x, y float64) ([]float64, bool) {
 	}
 	u, v := math.Max(0, math.Min(3, x*4/float64(g.w)-.5)), math.Max(0, math.Min(3, y*4/float64(g.h)-.5))
 	ix, iy := int(u), int(v)
-	p := make([]float64, comaSide*comaSide)
+	p := make([]float64, (2*g.radius+1)*(2*g.radius+1))
 	var sum float64
 	for dy := 0; dy < 2; dy++ {
 		for dx := 0; dx < 2; dx++ {
@@ -322,10 +345,12 @@ func (g *spatialPSF) empiricalAt(x, y float64) ([]float64, bool) {
 }
 
 func kernelFromPSF(p []float64) ellipticalKernel {
-	k := ellipticalKernel{rx: comaRadius, ry: comaRadius}
+	side := int(math.Sqrt(float64(len(p))))
+	radius := side / 2
+	k := ellipticalKernel{rx: radius, ry: radius}
 	for i, v := range p {
 		if v > 0 {
-			k.taps = append(k.taps, psfTap{comaRadius - i%comaSide, comaRadius - i/comaSide, v})
+			k.taps = append(k.taps, psfTap{radius - i%side, radius - i/side, v})
 		}
 	}
 	return k
@@ -340,7 +365,7 @@ func (k ellipticalKernel) adjoint() ellipticalKernel {
 }
 
 func assessComaRestoration(before, after *Img, model restorationModel, origin image.Point) (string, error) {
-	stars := detectStars(before)
+	stars := detectEmpiricalStars(before, model.spatial.profile)
 	stars = stars[:min(len(stars), 4000)]
 	var selected []star
 	for _, s := range stars {
@@ -355,8 +380,8 @@ func assessComaRestoration(before, after *Img, model restorationModel, origin im
 	for c := 0; c < before.C; c++ {
 		var widths, afterWidths, flux, drift, asym, newAsym []float64
 		for _, s := range selected {
-			a, ok := measureComaStar(before, c, s)
-			b, ok2 := measureComaStar(after, c, s)
+			a, ok := measureProfileStar(before, c, s, model.spatial.radius)
+			b, ok2 := measureProfileStar(after, c, s, model.spatial.radius)
 			if !ok || !ok2 {
 				continue
 			}
@@ -375,7 +400,7 @@ func assessComaRestoration(before, after *Img, model restorationModel, origin im
 		_, n1, _ := restorationBackground(before.Pix[c*n:(c+1)*n], before.W)
 		_, n2, _ := restorationBackground(after.Pix[c*n:(c+1)*n], after.W)
 		notes = append(notes, fmt.Sprintf("%s ширина %.2f→%.2f px; асимметрия %.3f→%.3f; поток ×%.3f; шум ×%.2f", channelName(c, before.C), w, W, a, A, f, n2/n1))
-		if W >= .99*w || W < .65*w || A > .98*a || math.Abs(f-1) > .05 || d > .15 || n2 > math.Max(1.2*n1, n1+1e-6) {
+		if W >= .99*w || W < .65*w || ((!model.spatial.profile || a >= .04) && A > .98*a) || math.Abs(f-1) > .05 || d > .15 || n2 > math.Max(1.2*n1, n1+1e-6) {
 			return fmt.Sprint(notes), fmt.Errorf("%s: проба комы не прошла проверки профиля, потока, центров или шума", channelName(c, before.C))
 		}
 	}
@@ -384,21 +409,27 @@ func assessComaRestoration(before, after *Img, model restorationModel, origin im
 		a, b = restorationLuminance(before), restorationLuminance(after)
 	}
 	var oldA, newA [16][]float64
+	var oldW, newW [16][]float64
 	for _, s := range selected {
-		x, ok := measureComaStar(a, 0, s)
-		y, ok2 := measureComaStar(b, 0, s)
+		x, ok := measureProfileStar(a, 0, s, model.spatial.radius)
+		y, ok2 := measureProfileStar(b, 0, s, model.spatial.radius)
 		if ok && ok2 {
 			ix := min(3, max(0, int((s.x+float64(origin.X))*4/float64(model.spatial.w))))
 			iy := min(3, max(0, int((s.y+float64(origin.Y))*4/float64(model.spatial.h))))
 			oldA[iy*4+ix] = append(oldA[iy*4+ix], x.asym)
 			newA[iy*4+ix] = append(newA[iy*4+ix], y.asym)
+			oldW[iy*4+ix] = append(oldW[iy*4+ix], x.width)
+			newW[iy*4+ix] = append(newW[iy*4+ix], y.width)
 		}
 	}
 	for i := range oldA {
-		if len(oldA[i]) >= 5 && median(newA[i]) > .98*median(oldA[i]) {
+		if len(oldA[i]) >= 5 && (!model.spatial.profile || median(oldA[i]) >= .04) && median(newA[i]) > .98*median(oldA[i]) {
 			return strings.Join(notes, "; "), fmt.Errorf("PSF[%d,%d]: асимметрия не уменьшилась", i/4+1, i%4+1)
 		}
 		if len(oldA[i]) >= 5 {
+			if median(newW[i]) >= .99*median(oldW[i]) || median(newW[i]) < .65*median(oldW[i]) {
+				return strings.Join(notes, "; "), fmt.Errorf("PSF[%d,%d]: локальная ширина вне допуска", i/4+1, i%4+1)
+			}
 			g := model.spatial
 			x, y := i%4, i/4
 			r := image.Rect((x*g.w+3)/4, (y*g.h+3)/4, ((x+1)*g.w+3)/4, ((y+1)*g.h+3)/4).Sub(origin).Intersect(image.Rect(0, 0, a.W, a.H))

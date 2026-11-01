@@ -102,6 +102,8 @@ type ui struct {
 	saveBtn, clearPts           widget.Clickable
 	viewGrid, viewPts, viewRes  widget.Clickable
 	mapBtn, mapPrev, mapNext    widget.Clickable
+	chromResidualBtn            widget.Clickable
+	chromResidual               bool
 	chromMaps                   []chromMapTile
 	chromIndex                  int
 	chromPanels                 [2]panel
@@ -113,8 +115,11 @@ type ui struct {
 	clearAll                    widget.Clickable // remove all tiles
 	chAlign, lfit, bgEq         widget.Bool      // stitch aligns colour channels / applies LinearFit / evens out backgrounds
 	psfMatch                    widget.Bool      // optional Gaussian-core matching, off by default
+	psfField                    bool
+	psfModeBtn                  widget.Clickable
 	restoration                 restorationState
 	gradient                    gradientState
+	flat                        flatState
 	more                        bool       // «Дополнительно» row shown
 	weak                        []cellPair // neighbours the stars could not tie together
 	stretch, link               widget.Bool
@@ -265,6 +270,7 @@ func (u *ui) layout(gtx layout.Context) {
 func (u *ui) handle(gtx layout.Context) {
 	u.handleRestoration(gtx)
 	u.handleGradient(gtx)
+	u.handleFlat(gtx)
 	if u.diagBtn.Clicked(gtx) {
 		u.view = 4
 	}
@@ -281,6 +287,10 @@ func (u *ui) handle(gtx layout.Context) {
 	}
 	if u.mapPrev.Clicked(gtx) && u.chromIndex > 0 {
 		u.chromIndex--
+		u.resetChromPanels()
+	}
+	if u.chromResidualBtn.Clicked(gtx) {
+		u.chromResidual = !u.chromResidual
 		u.resetChromPanels()
 	}
 	if u.mapNext.Clicked(gtx) && u.chromIndex+1 < len(u.chromMaps) {
@@ -300,6 +310,10 @@ func (u *ui) handle(gtx layout.Context) {
 		}
 	}
 	correctionChanged := u.chAlign.Update(gtx)
+	if u.psfModeBtn.Clicked(gtx) && !u.busy {
+		u.psfField = !u.psfField
+		correctionChanged = u.psfMatch.Value
+	}
 	if u.lfit.Update(gtx) {
 		correctionChanged = true
 	}
@@ -527,16 +541,29 @@ func (t *tileState) setPrev(pv [nPrev]*image.RGBA) {
 
 func (u *ui) stitch() {
 	tiles, _, pts, ov := u.gather()
-	if len(tiles) < 2 {
-		u.status = "Нужно минимум две плитки"
+	if len(tiles) == 0 {
+		u.status = "Откройте хотя бы одно изображение"
 		return
 	}
 	ov *= 100
 	u.busy = true
 	u.status = "Сшиваю…"
 	chAlign, lfit, bgEq, psfMatch := u.chAlign.Value, u.lfit.Value, u.bgEq.Value, u.psfMatch.Value
+	masterFlat := u.flat.image
+	fieldPSF := u.psfField
 	go func() {
 		var chNotes []string
+		if masterFlat != nil {
+			for _, t := range tiles {
+				calibrated, note, err := applyMasterFlat(t.Img, masterFlat)
+				if err != nil {
+					u.post(func() { u.busy = false; u.status = t.Name + ": " + err.Error() })
+					return
+				}
+				t.Img = calibrated
+				chNotes = append(chNotes, t.Name+" "+note)
+			}
+		}
 		if chAlign { // per tile, in its own optics frame, before the stars are matched across tiles
 			u.post(func() { u.status = "Совмещаю цветовые каналы по звёздам…" })
 			for _, t := range tiles {
@@ -545,6 +572,26 @@ func (u *ui) stitch() {
 					chNotes = append(chNotes, t.Name+": "+note)
 				}
 			}
+		}
+		if len(tiles) == 1 {
+			input, diagnostics, note := processSingleFrame(tiles[0], psfMatch, fieldPSF)
+			if note != "" {
+				chNotes = append(chNotes, note)
+			}
+			pv := previews(input, previewSide)
+			u.post(func() {
+				u.busy = false
+				u.setResult(input, pv)
+				u.history = nil
+				u.sel = nil
+				u.view = 2
+				u.weak = nil
+				u.diagnostics = diagnostics
+				u.diagIndex = 0
+				u.diagPanels = [2]panel{{needFit: true}, {needFit: true}}
+				u.status = "Изображение готово. Доступны градиент фона и деконволюция; геометрия мозаики и коррекции перекрытий пропущены. " + strings.Join(chNotes, "; ")
+			})
+			return
 		}
 		W, notes, weak, measurements := placeMeasured(tiles, pts, ov/100)
 		u.post(func() {
@@ -555,7 +602,13 @@ func (u *ui) stitch() {
 			u.post(func() {
 				u.status = "Согласовываю резкость плиток и каналов по звёздам…"
 			})
-			images, report := matchPSF(tiles, W)
+			var images []*Img
+			var report psfMatchReport
+			if fieldPSF {
+				images, report = matchFieldPSF(tiles, W)
+			} else {
+				images, report = matchPSF(tiles, W)
+			}
 			for i := range tiles {
 				tiles[i].Img = images[i]
 				diagnostics.tiles[i].psfNote = report.tileNote(i)
@@ -616,6 +669,9 @@ func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
 	u.restoration.images = [2][nPrev]paint.ImageOp{}
 	u.restoration.psfMap = paint.ImageOp{}
 	u.restoration.showMap = false
+	if m.C != 3 {
+		u.restoration.independent = false
+	}
 	u.gradient.source = nil
 	u.gradient.valid = false
 	u.gradient.images = [2][nPrev]paint.ImageOp{}
@@ -681,15 +737,35 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 	if u.result == nil {
 		resTab = "Результат (нет)"
 	}
+	loaded := 0
+	for k, t := range u.tiles {
+		if k[0] < u.rows && k[1] < u.cols && t.img != nil {
+			loaded++
+		}
+	}
+	actionLabel := "Склеить"
+	if loaded == 1 {
+		actionLabel = "Обработать"
+	}
 	row1 := []layout.FlexChild{
 		btn(&u.gridBtn, fmt.Sprintf("Сетка %d × %d ▾", u.rows, u.cols)), sp, sp,
 		layout.Rigid(material.Body1(th, "Вид:").Layout), sp,
 		tab(&u.viewGrid, "Плитки", u.view == 0 || u.view == 1), tab(&u.viewRes, resTab, u.view == 2), sp, sp,
 		btn(&u.openAll, "Открыть плитки…"), sp,
 		layout.Rigid(checkBox(th, &u.chAlign, "Совместить каналы").Layout), sp,
-		layout.Rigid(checkBox(th, &u.lfit, "LinearFit").Layout), sp,
-		layout.Rigid(checkBox(th, &u.bgEq, "Фон по перекрытию").Layout), sp,
-		btn(&u.stitchBtn, "Склеить"), sp,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if loaded == 1 {
+				return layout.Dimensions{}
+			}
+			return checkBox(th, &u.lfit, "LinearFit").Layout(gtx)
+		}), sp,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if loaded == 1 {
+				return layout.Dimensions{}
+			}
+			return checkBox(th, &u.bgEq, "Фон по перекрытию").Layout(gtx)
+		}), sp,
+		btn(&u.stitchBtn, actionLabel), sp,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			if u.result == nil || u.busy { // nothing to save yet
 				gtx = gtx.Disabled()
@@ -739,6 +815,16 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 				}
 				return checkBox(th, &u.psfMatch, "Согласовать резкость").Layout(gtx)
 			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if u.busy {
+					gtx = gtx.Disabled()
+				}
+				label := "PSF: ядра ▾"
+				if u.psfField {
+					label = "PSF: поле/профили ▾"
+				}
+				return material.Button(th, &u.psfModeBtn, label).Layout(gtx)
+			}),
 			sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				if u.busy || u.result == nil {
 					gtx = gtx.Disabled()
@@ -750,6 +836,22 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 					gtx = gtx.Disabled()
 				}
 				return material.Button(th, &u.gradient.open, "Градиент фона…").Layout(gtx)
+			}),
+			sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if u.busy {
+					gtx = gtx.Disabled()
+				}
+				label := "Master flat…"
+				if u.flat.image != nil {
+					label = "Master flat ✓…"
+				}
+				return material.Button(th, &u.flat.open, label).Layout(gtx)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if u.busy || u.flat.image == nil {
+					gtx = gtx.Disabled()
+				}
+				return material.Button(th, &u.flat.clear, "Без flat").Layout(gtx)
 			}),
 		}
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(row1), row(row2), row(row3))

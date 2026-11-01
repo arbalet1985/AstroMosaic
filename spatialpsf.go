@@ -29,9 +29,11 @@ type psfNode struct {
 	asymmetry float64
 }
 type spatialPSF struct {
-	w, h  int
-	nodes [16]psfNode
-	coma  bool
+	w, h    int
+	nodes   [16]psfNode
+	coma    bool
+	profile bool
+	radius  int
 }
 
 func psfAsymmetry(m *Img, c int, p starPSF) float64 {
@@ -202,6 +204,9 @@ func (g *spatialPSF) summary() string {
 	if g.coma {
 		name = "Локальная асимметричная PSF (кома)"
 	}
+	if g.profile {
+		name = "Локальная эмпирическая PSF (крылья/дефокус)"
+	}
 	return fmt.Sprintf("%s: %d/16 ячеек; вне измеренного покрытия сохраняется исходник", name, n)
 }
 
@@ -269,6 +274,9 @@ func (k ellipticalKernel) convolve(src []float32, w, h int) []float32 {
 // A fixed global patch lattice is shared by the preview and full operation.
 // Each patch has sufficient RL context; raised-cosine overlap weights blend it.
 func restoreSpatialRegion(m *Img, model restorationModel, p restorationParams, region image.Rectangle, progress func(int, int)) *Img {
+	if len(model.colorModels) > 0 {
+		return restoreColorRegion(m, model, p, region, progress)
+	}
 	const half, stride = 256, 384
 	bounds := image.Rect(0, 0, m.W, m.H)
 	region = region.Intersect(bounds)

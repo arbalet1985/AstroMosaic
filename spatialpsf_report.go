@@ -13,6 +13,9 @@ import (
 )
 
 func assessRestorationModel(before, after *Img, model restorationModel, origin image.Point) (string, error) {
+	if len(model.colorModels) > 0 {
+		return assessColorRestoration(before, after, model, origin)
+	}
 	if model.spatial != nil && model.spatial.coma {
 		return assessComaRestoration(before, after, model, origin)
 	}
