@@ -328,19 +328,21 @@ func writeFITS(path string, m *Img) error {
 // ---------- XISF ----------
 
 type xisfDoc struct {
-	Image struct {
-		Geometry     string `xml:"geometry,attr"`
-		SampleFormat string `xml:"sampleFormat,attr"`
-		Location     string `xml:"location,attr"`
-		PixelStorage string `xml:"pixelStorage,attr"`
-		ByteOrder    string `xml:"byteOrder,attr"`
-		Compression  string `xml:"compression,attr"`
-		Bounds       string `xml:"bounds,attr"`
-		Keywords     []struct {
-			Name  string `xml:"name,attr"`
-			Value string `xml:"value,attr"`
-		} `xml:"FITSKeyword"`
-	} `xml:"Image"`
+	Images []xisfImage `xml:"Image"`
+}
+
+type xisfImage struct {
+	Geometry     string `xml:"geometry,attr"`
+	SampleFormat string `xml:"sampleFormat,attr"`
+	Location     string `xml:"location,attr"`
+	PixelStorage string `xml:"pixelStorage,attr"`
+	ByteOrder    string `xml:"byteOrder,attr"`
+	Compression  string `xml:"compression,attr"`
+	Bounds       string `xml:"bounds,attr"`
+	Keywords     []struct {
+		Name  string `xml:"name,attr"`
+		Value string `xml:"value,attr"`
+	} `xml:"FITSKeyword"`
 }
 
 func readXISF(r io.Reader) (*Img, error) {
@@ -352,11 +354,19 @@ func readXISF(r io.Reader) (*Img, error) {
 		return nil, errors.New("xisf: bad signature")
 	}
 	hl := int(binary.LittleEndian.Uint32(data[8:12]))
+	if hl > len(data)-16 {
+		return nil, errors.New("xisf: truncated header")
+	}
 	var doc xisfDoc
 	if err := xml.Unmarshal(data[16:16+hl], &doc); err != nil {
 		return nil, fmt.Errorf("xisf header: %w", err)
 	}
-	im := doc.Image
+	if len(doc.Images) == 0 {
+		return nil, errors.New("xisf: no image")
+	}
+	// The primary image is first. Later images can be crop masks or other
+	// auxiliaries; decoding them into one struct also merges unrelated metadata.
+	im := doc.Images[0]
 	g := strings.Split(im.Geometry, ":")
 	loc := strings.Split(im.Location, ":")
 	if len(g) < 2 || len(loc) != 3 || loc[0] != "attachment" {
@@ -650,7 +660,7 @@ func stretchParams(m *Img, linked bool) (c0, mid []float64) {
 	for c := 0; c < m.C; c++ {
 		s := make([]float64, 0, n/stride+1)
 		for i := 0; i < n; i += stride {
-			if v := m.Pix[c*n+i]; v != 0 { // as Siril: zero pixels (empty mosaic corners) are not data
+			if v := m.Pix[c*n+i]; v != 0 && finitePoint(float64(v), 0) { // ignore missing/nonfinite data
 				s = append(s, float64(v))
 			}
 		}
@@ -711,21 +721,23 @@ func preview(m *Img, maxSide int, mode int) *image.RGBA {
 	k := max(1, (max(m.W, m.H)+maxSide-1)/maxSide)
 	pw, ph := m.W/k, m.H/k
 	out := image.NewRGBA(image.Rect(0, 0, pw, ph))
-	lut := make([][4096]uint8, m.C)
 	c0, mid := make([]float64, m.C), make([]float64, m.C)
 	if mode != prevLinear {
 		c0, mid = stretchParams(m, mode == prevLinked)
 	}
-	for c := range lut {
-		for i := range lut[c] {
-			v := float64(i) / 4095
-			if mode != prevLinear {
-				v = mtf(v, mid[c], c0[c], 1)
-			}
-			lut[c][i] = uint8(v*255 + 0.5)
+	// Evaluate the original float samples: a 12-bit linear-domain LUT collapses
+	// faint backgrounds (~0.001) into just a few levels before stretching.
+	q := func(c int, sample float32) uint8 {
+		v := float64(sample)
+		if !finitePoint(v, 0) {
+			return 0
 		}
+		if mode != prevLinear {
+			v = mtf(v, mid[c], c0[c], 1)
+		}
+		v = math.Min(1, math.Max(0, v))
+		return uint8(v*255 + .5)
 	}
-	q := func(c int, v float32) uint8 { return lut[c][int(math.Min(math.Max(float64(v), 0), 1)*4095)] }
 	n := m.W * m.H
 	for y := 0; y < ph; y++ {
 		for x := 0; x < pw; x++ {
