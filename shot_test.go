@@ -30,7 +30,7 @@ func TestShot(t *testing.T) {
 			sz = image.Pt(1200, 700)
 		}
 	}
-	if os.Getenv("SHOTRESTORE") != "" || os.Getenv("SHOTGRADIENT") != "" {
+	if os.Getenv("SHOTRESTORE") != "" || os.Getenv("SHOTGRADIENT") != "" || os.Getenv("SHOTHALO") != "" {
 		sz = image.Pt(1200, 750)
 	}
 	w, err := headless.NewWindow(sz.X, sz.Y)
@@ -43,6 +43,16 @@ func TestShot(t *testing.T) {
 	u := &ui{th: th, rows: 2, cols: 2, tiles: map[cell]*tileState{}, points: map[cellPair][]PointPair{}, pairBtns: map[cellPair]*widget.Clickable{}}
 	u.link.Value, u.chAlign.Value, u.lfit.Value, u.bgEq.Value = true, true, true, true
 	u.overlapSl.Value = 15.0 / maxOverlap
+	if os.Getenv("SHOTHALO") != "" {
+		m := haloTestImage()
+		out, r, err := correctColorHalos(m, .75)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.result, u.view, u.stretch.Value = m, 7, true
+		u.colorHalo = colorHaloState{source: m, candidate: out, cachedStrength: .75, region: image.Rect(0, 0, m.W, m.H), note: r.note}
+		u.refreshHaloPreviews()
+	}
 	if os.Getenv("SHOTRESTORE") != "" {
 		m := psfTestTile([]float64{2.2, 2.1, 2.3})
 		if os.Getenv("SHOTSINGLE") != "" {
