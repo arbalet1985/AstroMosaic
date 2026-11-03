@@ -28,10 +28,11 @@ var inputExts = []string{".fits", ".fit", ".fts", ".xisf", ".tif", ".tiff", ".pn
 
 // Img is a planar float image, values nominally 0..1, row 0 = top.
 type Img struct {
-	W, H, C  int
-	Pix      []float32 // Pix[c*W*H + y*W + x]
-	Hdr      map[string]string
-	BottomUp bool // FITS WCS refers to bottom-up rows
+	Operations []string // session provenance; copied on explicit application
+	W, H, C    int
+	Pix        []float32 // Pix[c*W*H + y*W + x]
+	Hdr        map[string]string
+	BottomUp   bool // FITS WCS refers to bottom-up rows
 }
 
 func newImg(w, h, c int) *Img {

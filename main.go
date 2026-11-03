@@ -127,6 +127,7 @@ type ui struct {
 	gradient                    gradientState
 	colorHalo                   colorHaloState
 	quality                     qualityState
+	noise                       noiseState
 	flat                        flatState
 	more                        bool       // «Дополнительно» row shown
 	weak                        []cellPair // neighbours the stars could not tie together
@@ -184,6 +185,7 @@ func main() {
 		u.overlapSl.Value = 15.0 / maxOverlap
 		u.angleEd.SetText("0")
 		u.link.Value, u.clamp.Value, u.it = true, true, interpLanczos4
+		u.restoration.regularization.Value = true
 		u.chAlign.Value, u.lfit.Value, u.bgEq.Value = true, true, true
 		u.pairList.Axis = layout.Vertical
 		var ops op.Ops
@@ -246,6 +248,8 @@ func (u *ui) layout(gtx layout.Context) {
 					return u.colorHaloView(gtx)
 				case 8:
 					return u.qualityView(gtx)
+				case 9:
+					return u.noiseView(gtx)
 				}
 				return u.gridView(gtx)
 			}
@@ -287,6 +291,7 @@ func (u *ui) handle(gtx layout.Context) {
 	u.handleGradient(gtx)
 	u.handleColorHalos(gtx)
 	u.handleQuality(gtx)
+	u.handleNoise(gtx)
 	if u.comparison.fit.Clicked(gtx) {
 		u.fitActiveView(false)
 	}
@@ -693,6 +698,8 @@ func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
 	u.restoration.modelValid, u.restoration.hasPreview, u.restoration.approved = false, false, false
 	u.restoration.images = [2][nPrev]paint.ImageOp{}
 	u.restoration.psfMap = paint.ImageOp{}
+	u.restoration.residual = paint.ImageOp{}
+	u.restoration.showResidual = false
 	u.restoration.showMap = false
 	u.restoration.panels = [2]panel{}
 	if m.C != 3 {
@@ -706,6 +713,13 @@ func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
 	u.colorHalo.source, u.colorHalo.candidate = nil, nil
 	u.colorHalo.images = [2][nPrev]paint.ImageOp{}
 	u.colorHalo.panels = [2]panel{}
+	u.noise.source = nil
+	u.noise.model = waveModel{}
+	u.noise.hasPreview = false
+	u.noise.images = [2][nPrev]paint.ImageOp{}
+	u.noise.residual = paint.ImageOp{}
+	u.noise.panels = [2]panel{}
+	u.noise.comparison = ""
 	u.quality.source = nil
 	u.quality.data = qualityReport{}
 	u.result = m
@@ -903,6 +917,12 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 				gtx = gtx.Disabled()
 			}
 			return material.Button(th, &u.quality.open, "Отчёт качества…").Layout(gtx)
+		}))
+		row4 = append(row4, sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if u.busy || u.result == nil {
+				gtx = gtx.Disabled()
+			}
+			return material.Button(th, &u.noise.open, "Шум / детали…").Layout(gtx)
 		}))
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(row1), row(row2), row(row3), row(row4))
 	})
@@ -1399,6 +1419,7 @@ func (u *ui) geom(name string, op func(*Img) *Img) {
 		pv := previews(out, previewSide)
 		u.post(func() {
 			u.busy = false
+			recordProcessing(res, out, name)
 			u.pushHistory(res)
 			u.baseline = original
 			u.setResult(out, pv)

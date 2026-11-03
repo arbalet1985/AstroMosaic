@@ -57,6 +57,7 @@ func (u *ui) handleColorHalos(gtx layout.Context) {
 			pv := previews(out, previewSide)
 			u.post(func() {
 				u.busy = false
+				recordProcessing(source, out, "Цветные ореолы")
 				u.pushHistory(source)
 				u.setResult(out, pv)
 				u.sel = nil

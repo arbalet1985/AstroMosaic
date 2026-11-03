@@ -10,6 +10,7 @@ import (
 type restorationParams struct {
 	iterations int
 	fraction   float64
+	regularize bool
 }
 type restorationChannel struct{ fwhm, sky, noise, offset float64 }
 type restorationModel struct {
@@ -134,6 +135,9 @@ func restorationRadius(model restorationModel, p restorationParams) int {
 			}
 		}
 	}
+	if p.regularize {
+		r += 3
+	}
 	return r
 }
 
@@ -222,6 +226,17 @@ func restorePlaneOperators(src []float32, w, h int, model restorationChannel, p 
 			}
 			factor := math.Min(1.25, math.Max(.8, float64(back[i]/sensitivity[i])))
 			estimate[i] *= float32(1 + float64(active[i])*(factor-1))
+		}
+		if p.regularize {
+			// Sparse two-scale projection after each RL step. Noise level is in
+			// the same linear units; significant star/detail coefficients survive.
+			settings := waveParams{Strength: .35, Gain: [waveLevels]float64{1, 1, 1, 1}}
+			projected := filterWavePlane(estimate, w, h, []float64{model.noise * .89, model.noise * .20}, settings, nil)
+			for i := range estimate {
+				if active[i] > 0 {
+					estimate[i] = projected[i]
+				}
+			}
 		}
 	}
 	out := append([]float32(nil), src...)

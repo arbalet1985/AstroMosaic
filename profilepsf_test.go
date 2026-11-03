@@ -44,7 +44,7 @@ func TestProfileRestoration(t *testing.T) {
 			t.Fatalf("disk=%v: %v", disk, err)
 		}
 		r := image.Rect(250, 250, 650, 650)
-		out := restoreSpatialRegion(m, model, restorationParams{5, .35}, r, nil)
+		out := restoreSpatialRegion(m, model, restorationParams{iterations: 5, fraction: .35}, r, nil)
 		note, err := assessRestorationModel(cropPixels(m, r), out, model, r.Min)
 		t.Logf("disk=%v %s", disk, note)
 		if err != nil {
@@ -60,14 +60,14 @@ func TestSeparateColorPSF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := restoreImage(m, model, restorationParams{5, .35}, nil)
+	out := restoreImage(m, model, restorationParams{iterations: 5, fraction: .35}, nil)
 	for c := 0; c < 3; c++ {
 		if out.at(c, 204, 204) != m.at(c, 204, 204) {
 			t.Fatal("separate PSFs changed shared saturation protection")
 		}
 	}
 	r := image.Rect(90, 90, 190, 190)
-	pv := restoreColorRegion(m, model, restorationParams{5, .35}, r, nil)
+	pv := restoreColorRegion(m, model, restorationParams{iterations: 5, fraction: .35}, r, nil)
 	for c := 0; c < 3; c++ {
 		for y := 0; y < pv.H; y++ {
 			for x := 0; x < pv.W; x++ {

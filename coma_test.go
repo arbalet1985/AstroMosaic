@@ -64,7 +64,7 @@ func TestComaRestoration(t *testing.T) {
 	}
 	t.Log(model.spatial.summary())
 	region := image.Rect(200, 200, 600, 600)
-	out := restoreSpatialRegion(m, model, restorationParams{5, .5}, region, nil)
+	out := restoreSpatialRegion(m, model, restorationParams{iterations: 5, fraction: .5}, region, nil)
 	note, err := assessComaRestoration(cropPixels(m, region), out, model, region.Min)
 	t.Log(note)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestComaRGBPreviewMatchesFull(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := append([]float32(nil), m.Pix...)
-	p := restorationParams{5, .35}
+	p := restorationParams{iterations: 5, fraction: .35}
 	out := restoreImage(m, model, p, nil)
 	note, err := assessRestorationModel(m, out, model, image.Point{})
 	t.Log(note)

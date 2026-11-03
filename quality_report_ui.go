@@ -73,12 +73,15 @@ func (u *ui) qualityView(gtx layout.Context) layout.Dimensions {
 					return material.Body2(u.th, "Отчёт появится после расчёта. Пробы без применения не учитываются.").Layout(gtx)
 				}
 				r := s.data
-				return material.List(u.th, &s.list).Layout(gtx, 8+len(r.Recommendations), func(gtx layout.Context, i int) layout.Dimensions {
+				return material.List(u.th, &s.list).Layout(gtx, 10+len(r.Recommendations), func(gtx layout.Context, i int) layout.Dimensions {
 					return layout.Inset{Top: unit.Dp(6), Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						switch i {
 						case 0:
 							affected := len(r.values(0, 0, "width", true))
 							text := fmt.Sprintf("Изменено %d из %d пикселей (%.3f%%). Нечисловых: %d.\nОбщих звёзд в контроле: %d, из них с изменениями в окрестности: %d. Выборка — до 400 ярких изолированных ненасыщенных звёзд, пригодных для измерения в обеих версиях.", r.Changed, r.W*r.H, 100*float64(r.Changed)/float64(r.W*r.H), r.Invalid, len(r.Stars), affected)
+							if len(r.Operations) > 0 {
+								text += "\nПрименено: " + strings.Join(r.Operations, " → ")
+							}
 							return material.Body2(u.th, text).Layout(gtx)
 						case 1:
 							var rows []string
@@ -107,11 +110,23 @@ func (u *ui) qualityView(gtx layout.Context) layout.Dimensions {
 								return qualityChart(gtx, r, i-2, u.th)
 							}))
 						case 6:
-							return material.Body2(u.th, "FWHM — гауссова оценка ядра, не всей PSF. Профили измерены в радиусе 16 px; отражения большего размера не оцениваются. Шум — оценка по разностям соседних пикселей; мелкая структура тоже влияет. Сумма сигнала всего кадра включает фон и не заменяет фотометрию звёзд. Изменённая площадь не является процентом улучшения. Нулевой эффект и ухудшения показываются без общего «балла качества». Рекомендации используют ориентировочные пороги и требуют проверки пробы. Этапы совмещения и сшивки до исходного результата оцениваются отдельно в карте хроматизма и диагностике поля.").Layout(gtx)
+							var rows []string
+							for scale := 0; scale < waveLevels; scale++ {
+								rows = append(rows, fmt.Sprintf("Масштаб %d–%d px: RMS коэффициентов %.6g → %.6g", 1<<scale, 2<<scale, r.ScalePower[0][scale], r.ScalePower[1][scale]))
+							}
+							rows = append(rows, "Мощность по масштабам измеряется в 16 одинаковых участках, включая сигнал и шум: её уменьшение само по себе не доказывает улучшение. Удалённый сигнал доступен в «Шум / детали» и деконволюции (серый ноль, ±4σ).")
+							return material.Body2(u.th, strings.Join(rows, "\n")).Layout(gtx)
 						case 7:
+							return layout.Flex{Axis: layout.Vertical}.Layout(gtx, layout.Rigid(material.Body2(u.th, "RMS по масштабам (линейный сигнал): серый До, бирюзовый После; включает шум и структуру").Layout), layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								gtx.Constraints.Min.Y, gtx.Constraints.Max.Y = gtx.Dp(220), gtx.Dp(220)
+								return qualityChart(gtx, r, 4, u.th)
+							}))
+						case 8:
+							return material.Body2(u.th, "FWHM — гауссова оценка ядра, не всей PSF. Профили измерены в радиусе 16 px; отражения большего размера не оцениваются. Шум — оценка по разностям соседних пикселей; мелкая структура тоже влияет. Сумма сигнала всего кадра включает фон и не заменяет фотометрию звёзд. Изменённая площадь не является процентом улучшения. Нулевой эффект и ухудшения показываются без общего «балла качества». Рекомендации используют ориентировочные пороги и требуют проверки пробы. Этапы совмещения и сшивки до исходного результата оцениваются отдельно в карте хроматизма и диагностике поля.").Layout(gtx)
+						case 9:
 							return material.Body1(u.th, "Предложения по дальнейшему улучшению").Layout(gtx)
 						default:
-							return material.Body2(u.th, "• "+r.Recommendations[i-8]).Layout(gtx)
+							return material.Body2(u.th, "• "+r.Recommendations[i-10]).Layout(gtx)
 						}
 					})
 				})
@@ -156,24 +171,32 @@ func qualityChart(gtx layout.Context, r qualityReport, kind int, th *material.Th
 				paint.FillShape(gtx.Ops, col, clip.Rect{Min: image.Pt(ix*size.X/40, iy*size.Y/40), Max: image.Pt((ix+1)*size.X/40, (iy+1)*size.Y/40)}.Op())
 			}
 		}
-	} else if len(r.Stars) > 0 {
+	} else if len(r.Stars) > 0 || kind == 4 {
 		switch kind {
-		case 1:
-			top := 1.
-			for c := 0; c < r.C; c++ {
+		case 1, 4:
+			channels := r.C
+			value := func(t, c int) float64 { return median(r.values(t, c, "width", false)) }
+			name := func(c int) string { return channelName(c, r.C) }
+			if kind == 4 {
+				channels = waveLevels
+				value = func(t, c int) float64 { return r.ScalePower[t][c] }
+				name = func(c int) string { return fmt.Sprintf("%d–%d px", 1<<c, 2<<c) }
+			}
+			top := 1e-9
+			for c := 0; c < channels; c++ {
 				for t := 0; t < 2; t++ {
-					top = math.Max(top, median(r.values(t, c, "width", false))*1.15)
+					top = math.Max(top, value(t, c)*1.15)
 				}
 			}
-			label(2, 8, fmt.Sprintf("%.1f", top))
-			label(2, 8+h/2, fmt.Sprintf("%.1f", top/2))
+			label(2, 8, fmt.Sprintf("%.2g", top))
+			label(2, 8+h/2, fmt.Sprintf("%.2g", top/2))
 			label(2, 8+h-12, "0")
-			for c := 0; c < r.C; c++ {
-				label(48+(float32(c)+.4)*w/float32(r.C), 8+h, channelName(c, r.C))
+			for c := 0; c < channels; c++ {
+				label(48+(float32(c)+.4)*w/float32(channels), 8+h, name(c))
 				for t, col := range []color.NRGBA{gray, teal} {
-					x := float32(c)*w/float32(r.C) + float32(t)*w/float32(r.C)/3 + w/float32(r.C)/8
-					val := median(r.values(t, c, "width", false))
-					paint.FillShape(gtx.Ops, col, clip.Rect{Min: image.Pt(int(48+x), int(8+h-h*float32(val/top))), Max: image.Pt(int(48+x+w/float32(r.C)/3), int(8+h))}.Op())
+					x := float32(c)*w/float32(channels) + float32(t)*w/float32(channels)/3 + w/float32(channels)/8
+					val := value(t, c)
+					paint.FillShape(gtx.Ops, col, clip.Rect{Min: image.Pt(int(48+x), int(8+h-h*float32(val/top))), Max: image.Pt(int(48+x+w/float32(channels)/3), int(8+h))}.Op())
 				}
 			}
 		case 2:
