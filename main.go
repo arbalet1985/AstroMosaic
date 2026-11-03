@@ -7,7 +7,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,13 +95,15 @@ type selDrag struct {
 }
 
 type ui struct {
-	w     *app.Window
-	th    *material.Theme
-	expl  *explorer.Explorer
-	tasks chan func()
+	sidebarState sidebarState
+	w            *app.Window
+	th           *material.Theme
+	expl         *explorer.Explorer
+	tasks        chan func()
 
 	overlapSl                   widget.Float // overlap kept round the seams, 0..maxOverlap %
-	overlapDrag                 bool         // the slider was being dragged last frame
+	stitchPending               bool
+	stitchConfirm, stitchCancel widget.Clickable
 	stitchBtn, gridBtn          widget.Clickable
 	grid                        gridPicker // Word-style rows × cols chooser under gridBtn
 	saveBtn, clearPts           widget.Clickable
@@ -222,56 +223,58 @@ func (u *ui) layout(gtx layout.Context) {
 	u.th.Palette.Fg = color.NRGBA{R: 0xe0, G: 0xe0, B: 0xe0, A: 0xff}
 	u.th.Palette.Bg = color.NRGBA{R: 0x20, G: 0x22, B: 0x26, A: 0xff}
 	layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(u.toolbar),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if u.view != 2 || u.result == nil {
-				return layout.Dimensions{}
-			}
-			return u.geomBar(gtx)
-		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			view := func(gtx layout.Context) layout.Dimensions {
-				switch u.view {
-				case 1:
-					return u.pointsView(gtx)
-				case 2:
-					return u.resultView(gtx)
-				case 3:
-					return u.chromatismView(gtx)
-				case 4:
-					return u.diagnosticsView(gtx)
-				case 5:
-					return u.restorationView(gtx)
-				case 6:
-					return u.gradientView(gtx)
-				case 7:
-					return u.colorHaloView(gtx)
-				case 8:
-					return u.qualityView(gtx)
-				case 9:
-					return u.noiseView(gtx)
-				}
-				return u.gridView(gtx)
-			}
-			if !u.grid.open {
-				return view(gtx)
-			}
-			return layout.Stack{Alignment: layout.NW}.Layout(gtx,
-				layout.Expanded(view),
-				layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-					defer clip.Rect{Max: gtx.Constraints.Min}.Push(gtx.Ops).Pop()
-					event.Op(gtx.Ops, &u.grid.open)
-					return layout.Dimensions{Size: gtx.Constraints.Min}
+			return layout.Flex{}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					width := min(gtx.Dp(280), gtx.Constraints.Max.X/3)
+					gtx.Constraints.Min.X, gtx.Constraints.Max.X = width, width
+					return u.sidebar(gtx)
 				}),
-				layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-					return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						d, r, c, ok := u.grid.Layout(gtx, u.th, u.rows, u.cols)
-						if ok {
-							u.setGrid(r, c)
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					view := func(gtx layout.Context) layout.Dimensions {
+						switch u.view {
+						case 1:
+							return u.pointsView(gtx)
+						case 2:
+							return u.resultView(gtx)
+						case 3:
+							return u.chromatismView(gtx)
+						case 4:
+							return u.diagnosticsView(gtx)
+						case 5:
+							return u.restorationView(gtx)
+						case 6:
+							return u.gradientView(gtx)
+						case 7:
+							return u.colorHaloView(gtx)
+						case 8:
+							return u.qualityView(gtx)
+						case 9:
+							return u.noiseView(gtx)
 						}
-						return d
-					})
-				}))
+						return u.gridView(gtx)
+					}
+					if !u.grid.open {
+						return view(gtx)
+					}
+					return layout.Stack{Alignment: layout.NW}.Layout(gtx,
+						layout.Expanded(view),
+						layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+							defer clip.Rect{Max: gtx.Constraints.Min}.Push(gtx.Ops).Pop()
+							event.Op(gtx.Ops, &u.grid.open)
+							return layout.Dimensions{Size: gtx.Constraints.Min}
+						}),
+						layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+							return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								d, r, c, ok := u.grid.Layout(gtx, u.th, u.rows, u.cols)
+								if ok {
+									u.setGrid(r, c)
+								}
+								return d
+							})
+						}))
+				}),
+			)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			status := u.status
@@ -281,7 +284,9 @@ func (u *ui) layout(gtx layout.Context) {
 			if u.psfMatch.Hovered() {
 				status = "Согласование резкости сглаживает более резкие плитки и каналы до общей ширины звёзд. Оценки до/после — в «Диагностике поля»."
 			}
-			return layout.UniformInset(unit.Dp(6)).Layout(gtx, material.Body2(u.th, status).Layout)
+			label := material.Body2(u.th, status)
+			label.MaxLines = 2
+			return layout.UniformInset(unit.Dp(6)).Layout(gtx, label.Layout)
 		}),
 	)
 }
@@ -340,7 +345,7 @@ func (u *ui) handle(gtx layout.Context) {
 	correctionChanged := u.chAlign.Update(gtx)
 	if u.psfModeBtn.Clicked(gtx) && !u.busy {
 		u.psfField = !u.psfField
-		correctionChanged = u.psfMatch.Value
+		correctionChanged = true
 	}
 	if u.lfit.Update(gtx) {
 		correctionChanged = true
@@ -351,8 +356,8 @@ func (u *ui) handle(gtx layout.Context) {
 	if u.psfMatch.Update(gtx) {
 		correctionChanged = true
 	}
-	if correctionChanged && u.result != nil && !u.busy {
-		u.stitch()
+	if correctionChanged && !u.busy {
+		u.stitchSettingsChanged()
 	}
 	if u.clearAll.Clicked(gtx) && !u.busy {
 		u.tiles, u.points, u.weak, u.cur = map[cell]*tileState{}, map[cellPair][]PointPair{}, nil, nil
@@ -363,13 +368,9 @@ func (u *ui) handle(gtx layout.Context) {
 	if u.openAll.Clicked(gtx) && !u.busy {
 		u.openMany()
 	}
-	// a changed overlap re-stitches once the slider is let go, not on every step of the drag
-	if u.overlapSl.Update(gtx) || u.overlapDrag && !u.overlapSl.Dragging() {
-		if !u.overlapSl.Dragging() && u.result != nil && !u.busy {
-			u.stitch()
-		}
+	if u.overlapSl.Update(gtx) && !u.busy {
+		u.stitchSettingsChanged()
 	}
-	u.overlapDrag = u.overlapSl.Dragging()
 	if u.weakBtn.Clicked(gtx) && len(u.weak) > 0 {
 		p := u.weak[0]
 		u.cur, u.view = &p, 1
@@ -390,6 +391,14 @@ func (u *ui) handle(gtx layout.Context) {
 	u.clamp.Update(gtx)
 	u.handleGeom(gtx)
 	if u.stitchBtn.Clicked(gtx) && !u.busy {
+		u.requestStitch()
+	}
+	if u.stitchCancel.Clicked(gtx) && !u.busy {
+		u.stitchPending = false
+		u.status = "Пересчёт отменён. Текущий результат и история сохранены."
+	}
+	if u.stitchConfirm.Clicked(gtx) && u.stitchPending && !u.busy {
+		u.stitchPending = false
 		u.stitch()
 	}
 	if u.saveBtn.Clicked(gtx) && u.result != nil && !u.busy {
@@ -567,6 +576,20 @@ func (t *tileState) setPrev(pv [nPrev]*image.RGBA) {
 	t.prevW = pv[0].Bounds().Dx()
 }
 
+func (u *ui) stitchSettingsChanged() {
+	u.stitchPending = false
+	u.status = "Настройки изменены. Они применятся после «Склеить / Обработать»; текущий результат и история сохранены."
+}
+
+func (u *ui) requestStitch() {
+	if u.result != nil && (len(u.history) > 0 || len(u.result.Operations) > 0 || u.sel != nil || (u.baseline != nil && u.baseline != u.result)) {
+		u.stitchPending = true
+		u.status = "Повторная обработка исходников заменит результат, кадрирование, улучшения и историю отмены. При необходимости сначала сохраните результат."
+		return
+	}
+	u.stitch()
+}
+
 func (u *ui) stitch() {
 	tiles, _, pts, ov := u.gather()
 	if len(tiles) == 0 {
@@ -609,9 +632,9 @@ func (u *ui) stitch() {
 			pv := previews(input, previewSide)
 			u.post(func() {
 				u.busy = false
-				u.setResult(input, pv)
 				u.history = nil
 				u.baseline, u.baselineHistory = nil, nil
+				u.setResult(input, pv)
 				u.sel = nil
 				u.view = 2
 				u.weak = nil
@@ -667,11 +690,12 @@ func (u *ui) stitch() {
 		pv := previews(res, previewSide)
 		u.post(func() {
 			u.busy = false
+			u.history = nil
+			u.baseline, u.baselineHistory = nil, nil
 			u.setResult(res, pv)
 			u.diagnostics, u.diagIndex = diagnostics, 0
 			u.diagPanels = [2]panel{{needFit: true}, {needFit: true}}
-			u.history, u.sel = nil, nil
-			u.baseline, u.baselineHistory = nil, nil
+			u.sel = nil
 			u.view = 2
 			u.weak = nil
 			for _, k := range weak {
@@ -692,6 +716,7 @@ func (u *ui) stitch() {
 }
 
 func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
+	u.stitchPending = false
 	// A preview belongs to one immutable result; release stale full-size sources.
 	u.restoration.source = nil
 	u.restoration.model = restorationModel{}
@@ -763,170 +788,6 @@ func (u *ui) save() {
 }
 
 // ---------- layout pieces ----------
-
-func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
-	th := u.th
-	sp := layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout)
-	btn := func(c *widget.Clickable, s string) layout.FlexChild {
-		return layout.Rigid(material.Button(th, c, s).Layout)
-	}
-	tab := func(c *widget.Clickable, s string, on bool) layout.FlexChild {
-		return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			b := material.Button(th, c, s)
-			if !on {
-				b.Background = color.NRGBA{R: 0x40, G: 0x44, B: 0x4c, A: 0xff}
-			}
-			return b.Layout(gtx)
-		})
-	}
-	// row 1: grid, view, then the stitching steps in order; row 2: display and stitching details
-	resTab := "Результат"
-	if u.result == nil {
-		resTab = "Результат (нет)"
-	}
-	loaded := 0
-	for k, t := range u.tiles {
-		if k[0] < u.rows && k[1] < u.cols && t.img != nil {
-			loaded++
-		}
-	}
-	actionLabel := "Склеить"
-	if loaded == 1 {
-		actionLabel = "Обработать"
-	}
-	row1 := []layout.FlexChild{
-		btn(&u.gridBtn, fmt.Sprintf("Сетка %d × %d ▾", u.rows, u.cols)), sp, sp,
-		layout.Rigid(material.Body1(th, "Вид:").Layout), sp,
-		tab(&u.viewGrid, "Плитки", u.view == 0 || u.view == 1), tab(&u.viewRes, resTab, u.view == 2), sp, sp,
-		btn(&u.openAll, "Открыть плитки…"), sp,
-		layout.Rigid(checkBox(th, &u.chAlign, "Совместить каналы").Layout), sp,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if loaded == 1 {
-				return layout.Dimensions{}
-			}
-			return checkBox(th, &u.lfit, "LinearFit").Layout(gtx)
-		}), sp,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if loaded == 1 {
-				return layout.Dimensions{}
-			}
-			return checkBox(th, &u.bgEq, "Фон по перекрытию").Layout(gtx)
-		}), sp,
-		btn(&u.stitchBtn, actionLabel), sp,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if u.result == nil || u.busy { // nothing to save yet
-				gtx = gtx.Disabled()
-				b := material.Button(th, &u.saveBtn, "Сохранить…")
-				b.Background = color.NRGBA{R: 0x33, G: 0x36, B: 0x3d, A: 0xff}
-				b.Color = color.NRGBA{R: 0x78, G: 0x7c, B: 0x84, A: 0xff}
-				return b.Layout(gtx)
-			}
-			return material.Button(th, &u.saveBtn, "Сохранить…").Layout(gtx)
-		}),
-		layout.Flexed(1, layout.Spacer{}.Layout), // «Очистить плитки» stands apart, at the far right
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			b := material.Button(th, &u.clearAll, "Очистить плитки")
-			b.Background = color.NRGBA{R: 0x80, G: 0x30, B: 0x30, A: 0xff}
-			return b.Layout(gtx)
-		}),
-	}
-	row2 := []layout.FlexChild{
-		layout.Rigid(checkBox(th, &u.stretch, "Авторастяжение").Layout),
-		layout.Rigid(checkBox(th, &u.link, "Связать каналы").Layout), sp, sp,
-		layout.Rigid(material.Body1(th, fmt.Sprintf("Перекрытие у шва: %2.0f%%", u.overlapPct())).Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Min.X, gtx.Constraints.Max.X = gtx.Dp(200), gtx.Dp(200)
-			return layout.Inset{Left: unit.Dp(6), Right: unit.Dp(6)}.Layout(gtx, material.Slider(th, &u.overlapSl).Layout)
-		}), sp,
-		btn(&u.viewPts, "Ручные точки"),
-	}
-	if len(u.weak) > 0 {
-		row2 = append(row2, sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			b := material.Button(th, &u.weakBtn, fmt.Sprintf("Проверить пары (%d)", len(u.weak)))
-			b.Background = color.NRGBA{R: 0xc0, G: 0x60, B: 0x20, A: 0xff}
-			return b.Layout(gtx)
-		}))
-	}
-	row := func(ch []layout.FlexChild) layout.FlexChild {
-		return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Inset{Top: unit.Dp(3), Bottom: unit.Dp(3)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Alignment: layout.Middle}.Layout(gtx, ch...)
-			})
-		})
-	}
-	return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		row3 := []layout.FlexChild{tab(&u.mapBtn, "Карта хроматизма", u.view == 3), sp, tab(&u.diagBtn, "Диагностика поля", u.view == 4), sp,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				return checkBox(th, &u.psfMatch, "Согласовать резкость").Layout(gtx)
-			}),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				label := "PSF: ядра ▾"
-				if u.psfField {
-					label = "PSF: поле/профили ▾"
-				}
-				return material.Button(th, &u.psfModeBtn, label).Layout(gtx)
-			}),
-			sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy || u.result == nil {
-					gtx = gtx.Disabled()
-				}
-				return material.Button(th, &u.restoration.open, "Деконволюция…").Layout(gtx)
-			}),
-			sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy || u.result == nil {
-					gtx = gtx.Disabled()
-				}
-				return material.Button(th, &u.gradient.open, "Градиент фона…").Layout(gtx)
-			}),
-			sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				label := "Master flat…"
-				if u.flat.image != nil {
-					label = "Master flat ✓…"
-				}
-				return material.Button(th, &u.flat.open, label).Layout(gtx)
-			}),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy || u.flat.image == nil {
-					gtx = gtx.Disabled()
-				}
-				return material.Button(th, &u.flat.clear, "Без flat").Layout(gtx)
-			}),
-		}
-		row4 := []layout.FlexChild{layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if u.busy || u.result == nil || u.result.C != 3 {
-				gtx = gtx.Disabled()
-			}
-			return material.Button(th, &u.colorHalo.open, "Цветные ореолы…").Layout(gtx)
-		})}
-		row4 = append(row4, sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if u.result == nil || u.baseline == u.result || !u.comparison.ready {
-				gtx = gtx.Disabled()
-			}
-			return checkBox(th, &u.comparison.enabled, "До / После результата").Layout(gtx)
-		}), sp, btn(&u.comparison.fit, "Вписать"), btn(&u.comparison.native, "100%"), sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if u.busy || u.result == nil {
-				gtx = gtx.Disabled()
-			}
-			return material.Button(th, &u.quality.open, "Отчёт качества…").Layout(gtx)
-		}))
-		row4 = append(row4, sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if u.busy || u.result == nil {
-				gtx = gtx.Disabled()
-			}
-			return material.Button(th, &u.noise.open, "Шум / детали…").Layout(gtx)
-		}))
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(row1), row(row2), row(row3), row(row4))
-	})
-}
 
 // maxOverlap is the slider's top, in % of the tile. The overlap kept round a seam is the zone
 // where the background is feathered; 0 is a butt joint. Past the tiles' real overlap (typically
@@ -1033,36 +894,8 @@ func (u *ui) adjacent() []cellPair {
 }
 
 func (u *ui) pointsView(gtx layout.Context) layout.Dimensions {
-	pairs := u.adjacent()
 	return layout.Flex{}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Max.X = gtx.Dp(200)
-			gtx.Constraints.Min.X = gtx.Constraints.Max.X
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(material.Body2(u.th, "Пары соседних плиток.\nЛКМ: точка на левой, потом на правой (или наоборот).\nКолесо: масштаб, перетаскивание: сдвиг.\nПКМ по метке: удалить.").Layout),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-				layout.Rigid(material.Button(u.th, &u.clearPts, "Очистить точки пары").Layout),
-				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return material.List(u.th, &u.pairList).Layout(gtx, len(pairs), func(gtx layout.Context, i int) layout.Dimensions {
-						p := pairs[i]
-						b := u.pairBtns[p]
-						if b == nil {
-							b = new(widget.Clickable)
-							u.pairBtns[p] = b
-						}
-						s := fmt.Sprintf("[%d,%d] ↔ [%d,%d]  (%d)", p.A[0]+1, p.A[1]+1, p.B[0]+1, p.B[1]+1, len(u.points[p]))
-						if slices.Contains(u.weak, p) {
-							s = "(!) " + s // the stars did not tie this pair
-						}
-						bs := material.Button(u.th, b, s)
-						if u.cur != nil && *u.cur == p {
-							bs.Background = color.NRGBA{R: 0xc0, G: 0x60, B: 0x20, A: 0xff}
-						}
-						return layout.UniformInset(unit.Dp(2)).Layout(gtx, bs.Layout)
-					})
-				}),
-			)
-		}),
+
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			if u.cur == nil || u.tiles[u.cur.A] == nil || u.tiles[u.cur.A].img == nil || u.tiles[u.cur.B] == nil || u.tiles[u.cur.B].img == nil {
 				return layout.Center.Layout(gtx, material.Body1(u.th, "Выберите пару слева").Layout)
@@ -1511,51 +1344,6 @@ func (u *ui) handleGeom(gtx layout.Context) {
 			})
 		}()
 	}
-}
-
-func (u *ui) geomBar(gtx layout.Context) layout.Dimensions {
-	th := u.th
-	sp := layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout)
-	btn := func(c *widget.Clickable, s string) layout.FlexChild {
-		return layout.Rigid(material.Button(th, c, s).Layout)
-	}
-	return layout.Inset{Left: unit.Dp(6), Right: unit.Dp(6), Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					btn(&u.ratioBtn, "Рамка: "+ratios[u.ratio].label), sp,
-					layout.Rigid(material.Body1(th, "Угол ° ").Layout),
-					btn(&u.angleDn, "−0.1"),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						gtx.Constraints.Min.X, gtx.Constraints.Max.X = gtx.Dp(360), gtx.Dp(360) // 1 dp ≈ 1°
-						return layout.UniformInset(unit.Dp(6)).Layout(gtx, material.Slider(th, &u.angleSl).Layout)
-					}),
-					btn(&u.angleUp, "+0.1"), sp,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						gtx.Constraints.Min.X, gtx.Constraints.Max.X = gtx.Dp(64), gtx.Dp(64)
-						return material.Editor(th, &u.angleEd, "").Layout(gtx)
-					}), sp,
-					btn(&u.interpBtn, "Интерполяция: "+interpNames[u.it]), sp,
-					layout.Rigid(checkBox(th, &u.clamp, "Без ореолов").Layout),
-				)
-			}),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					btn(&u.rotBtn, "Повернуть всё"), sp,
-					btn(&u.rotL, "90° влево"), sp, btn(&u.rotR, "90° вправо"), sp,
-					btn(&u.flipH, "Отразить ↔"), sp, btn(&u.flipV, "Отразить ↕"), sp,
-					btn(&u.clrSel, "Снять рамку"), sp, btn(&u.undo, "Отменить"),
-					layout.Flexed(1, layout.Spacer{}.Layout), // «Кадрировать» applies the frame: apart, at the far right
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						b := material.Button(th, &u.cropBtn, "Кадрировать")
-						b.Background = color.NRGBA{R: 0x2e, G: 0x8b, B: 0x57, A: 0xff}
-						return b.Layout(gtx)
-					}),
-				)
-			}),
-		)
-	})
 }
 
 // checkBox is material.CheckBox with a tick that stands out on the dark theme.

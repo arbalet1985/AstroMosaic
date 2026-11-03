@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"image"
 
 	"gioui.org/layout"
@@ -135,22 +134,7 @@ func (u *ui) colorHaloView(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(material.Body1(u.th, "Цветные ореолы звёзд — согласование радиальных RGB-профилей").Layout),
 			layout.Rigid(material.Body2(u.th, "Для линейного RGB с совмещёнными каналами. Модель перераспределяет свет внутри звёзд, сохраняя поток R/G/B и остаток изображения. Ядро может стать немного шире. Насыщенные звёзды, заметные соседи и ненадёжные модели пропускаются.\nПроверьте участок до/после с общей растяжкой. Чтобы выбрать другой участок, выделите его на результате и нажмите «Пересчитать». После применения доступна отмена.").Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				return layout.Flex{}.Layout(gtx,
-					layout.Rigid(material.Button(u.th, &s.preview, "Пересчитать").Layout),
-					layout.Rigid(material.Button(u.th, &s.strengthBtn, fmt.Sprintf("Сила: %.0f%% ▾", 100*s.amount())).Layout),
-					layout.Rigid(material.Button(u.th, &s.overviewBtn, "Обзор / участок").Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if s.candidate == nil || s.source != u.result || s.cachedStrength != s.amount() {
-							gtx = gtx.Disabled()
-						}
-						return material.Button(u.th, &s.apply, "Применить к результату").Layout(gtx)
-					}),
-				)
-			}),
+
 			layout.Rigid(material.Body2(u.th, s.note).Layout),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				if s.candidate == nil {

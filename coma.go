@@ -385,9 +385,13 @@ func assessComaRestoration(before, after *Img, model restorationModel, origin im
 			if !ok || !ok2 {
 				continue
 			}
+			fa, fb := apertureFlux(before, c, a.x, a.y), apertureFlux(after, c, b.x, b.y)
+			if fa <= 0 || fb <= 0 {
+				continue
+			}
 			widths = append(widths, a.width)
 			afterWidths = append(afterWidths, b.width)
-			flux = append(flux, b.flux/a.flux)
+			flux = append(flux, fb/fa)
 			drift = append(drift, math.Hypot(b.x-a.x, b.y-a.y))
 			asym = append(asym, a.asym)
 			newAsym = append(newAsym, b.asym)

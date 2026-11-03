@@ -274,6 +274,9 @@ func (k ellipticalKernel) convolve(src []float32, w, h int) []float32 {
 // A fixed global patch lattice is shared by the preview and full operation.
 // Each patch has sufficient RL context; raised-cosine overlap weights blend it.
 func restoreSpatialRegion(m *Img, model restorationModel, p restorationParams, region image.Rectangle, progress func(int, int)) *Img {
+	if model.spatial != nil && model.spatial.coma {
+		p.skipBalance = true
+	}
 	if len(model.colorModels) > 0 {
 		return restoreColorRegion(m, model, p, region, progress)
 	}
