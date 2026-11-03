@@ -62,12 +62,7 @@ func (u *ui) qualityView(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(material.Body1(u.th, "Отчёт качества — исходный результат до всех улучшений → текущий").Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				return material.Button(u.th, &s.refresh, "Пересчитать отчёт").Layout(gtx)
-			}),
+
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				if s.source != u.result {
 					return material.Body2(u.th, "Отчёт появится после расчёта. Пробы без применения не учитываются.").Layout(gtx)

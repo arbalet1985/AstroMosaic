@@ -271,61 +271,11 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 		return layout.Center.Layout(gtx, material.Body1(u.th, "Сначала сшейте мозаику").Layout)
 	}
 	p := s.settings()
-	modeLabel := "PSF: общая круглая ▾"
-	strengthLabel := fmt.Sprintf("Доля PSF: %.0f%% ▾", p.fraction*100)
-	if s.spatial {
-		modeLabel = "PSF: локальная эллиптическая ▾"
-		strengthLabel = fmt.Sprintf("Сила: %.0f%% ▾", p.fraction*100)
-	}
-	if s.coma {
-		modeLabel = "PSF: асимметричная кома ▾"
-	}
-	if s.profile {
-		modeLabel = "PSF: эмпирическая 33×33 ▾"
-	}
-	colorLabel := "Цвет: общая яркость ▾"
-	if s.independent {
-		colorLabel = "Цвет: отдельные PSF ▾"
-	}
 	return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(material.Body1(u.th, "Деконволюция — отдельная операция над результатом").Layout),
 			layout.Rigid(material.Body2(u.th, "Проба до 768×768 px: центр рамки результата либо область со звёздами. Слева — до, справа — после; растяжка общая.\nПо умолчанию RGB сохраняет отношения цветов. Отдельные PSF каналов исправляют разное размытие и могут менять цвет деталей.\nДля сохранения обработки нажмите «Применить ко всему результату».").Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(material.Button(u.th, &s.iterations, fmt.Sprintf("Итерации: %d ▾", p.iterations)).Layout),
-					layout.Rigid(material.Button(u.th, &s.strength, strengthLabel).Layout),
-					layout.Rigid(material.Button(u.th, &s.preview, "Пересчитать пробу").Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if !s.approved || s.source != u.result || p != s.cachedParams || s.spatial != s.cachedSpatial || s.coma != s.cachedComa || s.profile != s.cachedProfile || s.independent != s.cachedIndependent {
-							gtx = gtx.Disabled()
-						}
-						return material.Button(u.th, &s.apply, "Применить ко всему результату").Layout(gtx)
-					}),
-					layout.Rigid(material.Button(u.th, &s.mode, modeLabel).Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if u.result.C != 3 {
-							gtx = gtx.Disabled()
-						}
-						return material.Button(u.th, &s.colorBtn, colorLabel).Layout(gtx)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if !s.modelValid || s.source != u.result || s.model.spatial == nil {
-							gtx = gtx.Disabled()
-						}
-						return material.Button(u.th, &s.mapBtn, "Карта PSF").Layout(gtx)
-					}),
-				)
-			}),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				return layout.Flex{}.Layout(gtx, layout.Rigid(checkBox(u.th, &s.regularization, "Starlet-регуляризация").Layout), layout.Rigid(material.Button(u.th, &s.residualBtn, "После / удалённый сигнал").Layout))
-			}),
+
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				note := s.note
 				if s.source != u.result {
@@ -349,12 +299,7 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 					}
 					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 						layout.Rigid(material.Body2(u.th, legend).Layout),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							if !s.independent {
-								return layout.Dimensions{}
-							}
-							return material.Button(u.th, &s.mapChannelBtn, "Канал PSF: "+channelName(s.mapChannel, 3)+" ▾").Layout(gtx)
-						}),
+
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 							return u.zoomView(gtx, &s.mapPanel, s.psfMap, func(_ f32.Point, _ pointer.Buttons) {}, nil)
 						}),

@@ -23,7 +23,7 @@ func TestShot(t *testing.T) {
 	if path == "" {
 		t.Skip("set SHOT")
 	}
-	sz := image.Pt(1600, 200)
+	sz := image.Pt(1200, 750)
 	if os.Getenv("SHOTDIAG") != "" {
 		sz = image.Pt(1600, 1000)
 		if os.Getenv("SHOTSMALL") != "" {
@@ -188,19 +188,6 @@ func TestShot(t *testing.T) {
 	}
 	if os.Getenv("SHOTRES") != "" {
 		u.result = newImg(1, 1, 1)
-	}
-	if os.Getenv("SHOTGEOM") != "" { // result view: toolbar and the frame/rotate bar only
-		u.result, u.view = newImg(1, 1, 1), 2
-		var ops op.Ops
-		gtx := layout.Context{Ops: &ops, Constraints: layout.Exact(image.Pt(1600, 200)), Metric: unit.Metric{PxPerDp: 1, PxPerSp: 1}}
-		layout.Flex{Axis: layout.Vertical}.Layout(gtx, layout.Rigid(u.toolbar), layout.Rigid(u.geomBar))
-		w.Frame(&ops)
-		img := image.NewRGBA(image.Rectangle{Max: sz})
-		w.Screenshot(img)
-		f, _ := os.Create(path)
-		defer f.Close()
-		png.Encode(f, img)
-		return
 	}
 	if os.Getenv("SHOTGRID") != "" {
 		u.grid.open, u.grid.hr, u.grid.hc = true, 3, 4

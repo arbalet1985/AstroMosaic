@@ -185,31 +185,11 @@ func (u *ui) previewGradient() {
 
 func (u *ui) gradientView(gtx layout.Context) layout.Dimensions {
 	s := &u.gradient
-	modeLabel := "Поверхность: квадратичная ▾"
-	if s.rbf {
-		modeLabel = "Поверхность: RBF ▾"
-	}
 	return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(material.Body1(u.th, "Криволинейный градиент фона — аддитивная коррекция результата").Layout),
 			layout.Rigid(material.Body2(u.th, "Исключите туманности и галактики: щелчок по ячейке слева, затем «Пересчитать». Зелёный — фон, жёлтый — автоматический отсев, красный — ваше исключение.\nПротяжённый объект может выглядеть как градиент: проверьте модель перед применением. Вычитается только изменение уровня, без обрезания отрицательных значений.").Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				return layout.Flex{}.Layout(gtx,
-					layout.Rigid(material.Button(u.th, &s.preview, "Пересчитать").Layout),
-					layout.Rigid(material.Button(u.th, &s.reset, "Сбросить исключения").Layout),
-					layout.Rigid(material.Button(u.th, &s.modelBtn, "Модель / после").Layout),
-					layout.Rigid(material.Button(u.th, &s.modeBtn, modeLabel).Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if !s.valid || s.dirty || s.source != u.result {
-							gtx = gtx.Disabled()
-						}
-						return material.Button(u.th, &s.apply, "Применить к результату").Layout(gtx)
-					}),
-				)
-			}),
+
 			layout.Rigid(material.Body2(u.th, s.note).Layout),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				if s.source != u.result || s.images[0][u.si()].Size().X == 0 {

@@ -275,39 +275,11 @@ func noiseBenchmarkRegions(m *Img) []image.Rectangle {
 
 func (u *ui) noiseView(gtx layout.Context) layout.Dimensions {
 	s := &u.noise
-	p := s.settings()
 	return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(material.Body1(u.th, "Шумоподавление и детали — линейные данные").Layout),
 			layout.Rigid(material.Body2(u.th, "Starlet: B3-spline, 4 масштаба; ослабление слабых коэффициентов, усиление только значимых деталей. Внешние Siril NL-Bayes / GraXpert должны быть установлены; модели не загружаются автоматически.\nНасыщение и пропуски защищены в Starlet. Усиления действуют только для Starlet. Удалённый сигнал: серый — ноль, чёрный/белый — ±4σ; цвет показывает различия каналов. Это отображение, не сохранённые данные.").Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy {
-					gtx = gtx.Disabled()
-				}
-				return layout.Flex{}.Layout(gtx,
-					layout.Rigid(material.Button(u.th, &s.methodBtn, noiseMethods[s.method]+" ▾").Layout),
-					layout.Rigid(material.Button(u.th, &s.strengthBtn, fmt.Sprintf("Шум: %.0f%% ▾", 100*p.Strength)).Layout),
-					layout.Rigid(material.Button(u.th, &s.preview, "Пересчитать пробу").Layout),
-					layout.Rigid(material.Button(u.th, &s.residualBtn, "После / удалённый сигнал").Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if !s.hasPreview || s.source != u.result || s.cached != p || s.cachedMethod != s.method {
-							gtx = gtx.Disabled()
-						}
-						return material.Button(u.th, &s.apply, "Применить").Layout(gtx)
-					}),
-					layout.Rigid(material.Button(u.th, &s.benchmark, "Сравнить методы").Layout),
-				)
-			}),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				if u.busy || s.method != 0 {
-					gtx = gtx.Disabled()
-				}
-				var children []layout.FlexChild
-				for i := range s.gainBtns {
-					children = append(children, layout.Rigid(material.Button(u.th, &s.gainBtns[i], fmt.Sprintf("Детали %d–%d px: ×%.2f", 1<<i, 2<<i, p.Gain[i])).Layout))
-				}
-				return layout.Flex{}.Layout(gtx, children...)
-			}),
+
 			layout.Rigid(material.Body2(u.th, s.note).Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				if s.comparison == "" {

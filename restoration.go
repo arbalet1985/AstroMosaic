@@ -8,9 +8,10 @@ import (
 )
 
 type restorationParams struct {
-	iterations int
-	fraction   float64
-	regularize bool
+	iterations  int
+	fraction    float64
+	regularize  bool
+	skipBalance bool // internal: empirical PSFs use their full-support operator
 }
 type restorationChannel struct{ fwhm, sky, noise, offset float64 }
 type restorationModel struct {
@@ -138,7 +139,7 @@ func restorationRadius(model restorationModel, p restorationParams) int {
 	if p.regularize {
 		r += 3
 	}
-	return r
+	return r + 1 // extra context for the flux-preserving detail projection
 }
 
 // Saturated cores and their surroundings are shared across colour channels.
@@ -247,6 +248,25 @@ func restorePlaneOperators(src []float32, w, h int, model restorationChannel, p 
 			out[i] = float32(float64(estimate[i]) - model.offset)
 		}
 	}
+	if p.skipBalance {
+		return out
+	}
+	// Damping/active masks can create a positive DC component in the RL update.
+	// Retain only the detail part of that update. Symmetric normalized smoothing
+	// preserves its sum on an unmasked image; protection masks can limit that
+	// property, so the final stellar photometry check remains mandatory.
+	delta := make([]float32, len(src))
+	for i := range delta {
+		if src[i] != 0 && finitePoint(float64(src[i]), 0) {
+			delta[i] = out[i] - src[i]
+		}
+	}
+	low := gaussianRaw(delta, w, h, gaussianKernel(3))
+	for i := range out {
+		if src[i] != 0 && !protect[i] && finitePoint(float64(src[i]), 0) {
+			out[i] = src[i] + delta[i] - low[i]
+		}
+	}
 	return out
 }
 
@@ -352,22 +372,66 @@ func restorationPreviewRect(m *Img, stars []star, selection *frame) image.Rectan
 	return image.Rect(x, y, x+w, y+h)
 }
 
+// A wide aperture separates total stellar light from its redistribution into
+// the core. Robust tilted sky is fitted beyond the measured PSF wings.
 func apertureFlux(m *Img, c int, x, y float64) float64 {
+	const radius, border = 22, 30
 	ix, iy := int(math.Round(x)), int(math.Round(y))
-	if ix < 11 || iy < 11 || ix >= m.W-11 || iy >= m.H-11 {
+	if ix < border || iy < border || ix >= m.W-border || iy >= m.H-border {
 		return 0
 	}
-	var ring []float64
-	for d := -10; d <= 10; d++ {
-		ring = append(ring, float64(m.at(c, ix+d, iy-10)), float64(m.at(c, ix+d, iy+10)), float64(m.at(c, ix-10, iy+d)), float64(m.at(c, ix+10, iy+d)))
-	}
-	bg := median(ring)
-	var flux float64
-	for dy := -8; dy <= 8; dy++ {
-		for dx := -8; dx <= 8; dx++ {
-			if dx*dx+dy*dy <= 64 {
-				flux += float64(m.at(c, ix+dx, iy+dy)) - bg
+	type sample struct{ x, y, v float64 }
+	var ring []sample
+	for dy := -border; dy <= border; dy++ {
+		for dx := -border; dx <= border; dx++ {
+			X, Y := float64(ix+dx)-x, float64(iy+dy)-y
+			r := math.Hypot(X, Y)
+			if r < 26 || r > 30 {
+				continue
 			}
+			v := float64(m.at(c, ix+dx, iy+dy))
+			if v != 0 && finitePoint(v, 0) {
+				ring = append(ring, sample{X, Y, v})
+			}
+		}
+	}
+	if len(ring) < 300 {
+		return 0
+	}
+	var plane [3]float64
+	sigma := math.Inf(1)
+	for pass := 0; pass < 3; pass++ {
+		ls := newLSQ(3)
+		used := 0
+		for _, q := range ring {
+			if math.Abs(q.v-plane[0]-plane[1]*q.x-plane[2]*q.y) > 3*sigma {
+				continue
+			}
+			ls.add([]int{0, 1, 2}, []float64{1, q.x, q.y}, q.v, 1)
+			used++
+		}
+		if used < 200 {
+			return 0
+		}
+		copy(plane[:], ls.solve())
+		var residual []float64
+		for _, q := range ring {
+			residual = append(residual, math.Abs(q.v-plane[0]-plane[1]*q.x-plane[2]*q.y))
+		}
+		sigma = math.Max(1e-9, 1.4826*median(residual))
+	}
+	flux := 0.
+	for dy := -radius; dy <= radius; dy++ {
+		for dx := -radius; dx <= radius; dx++ {
+			X, Y := float64(ix+dx)-x, float64(iy+dy)-y
+			if X*X+Y*Y > radius*radius {
+				continue
+			}
+			v := float64(m.at(c, ix+dx, iy+dy))
+			if v == 0 || !finitePoint(v, 0) {
+				return 0
+			}
+			flux += v - plane[0] - plane[1]*X - plane[2]*Y
 		}
 	}
 	return flux
@@ -406,7 +470,7 @@ func assessRestoration(before, after *Img, stars []star) (string, error) {
 		n := before.W * before.H
 		_, noiseBefore, _ := restorationBackground(before.Pix[c*n:(c+1)*n], before.W)
 		_, noiseAfter, _ := restorationBackground(after.Pix[c*n:(c+1)*n], after.W)
-		notes = append(notes, fmt.Sprintf("%s FWHM %.2f → %.2f px; шум ×%.2f; поток ×%.3f (N=%d)", channelName(c, before.C), a, b, noiseAfter/noiseBefore, flux, len(oldWidths)))
+		notes = append(notes, fmt.Sprintf("%s FWHM %.2f → %.2f px; шум ×%.2f; поток r=22 px ×%.3f (N=%d; Nпоток=%d)", channelName(c, before.C), a, b, noiseAfter/noiseBefore, flux, len(oldWidths), len(fluxRatios)))
 		if b >= .98*a {
 			return strings.Join(notes, "; "), fmt.Errorf("%s: уменьшение ширины <2%%", channelName(c, before.C))
 		}
@@ -414,7 +478,7 @@ func assessRestoration(before, after *Img, stars []star) (string, error) {
 			return strings.Join(notes, "; "), fmt.Errorf("%s: чрезмерное изменение профиля или центров звёзд", channelName(c, before.C))
 		}
 		if math.Abs(flux-1) > .05 {
-			return strings.Join(notes, "; "), fmt.Errorf("%s: изменение апертурного потока >5%%", channelName(c, before.C))
+			return strings.Join(notes, "; "), fmt.Errorf("%s: изменение потока в апертуре r=22 px %+.2f%% (допуск ±5%%)", channelName(c, before.C), 100*(flux-1))
 		}
 		if noiseAfter > math.Max(noiseBefore*1.2, noiseBefore+1e-6) {
 			return strings.Join(notes, "; "), fmt.Errorf("%s: рост оценки шума >20%%", channelName(c, before.C))
