@@ -126,6 +126,7 @@ type ui struct {
 	restoration                 restorationState
 	gradient                    gradientState
 	colorHalo                   colorHaloState
+	quality                     qualityState
 	flat                        flatState
 	more                        bool       // «Дополнительно» row shown
 	weak                        []cellPair // neighbours the stars could not tie together
@@ -243,6 +244,8 @@ func (u *ui) layout(gtx layout.Context) {
 					return u.gradientView(gtx)
 				case 7:
 					return u.colorHaloView(gtx)
+				case 8:
+					return u.qualityView(gtx)
 				}
 				return u.gridView(gtx)
 			}
@@ -283,6 +286,7 @@ func (u *ui) handle(gtx layout.Context) {
 	u.handleRestoration(gtx)
 	u.handleGradient(gtx)
 	u.handleColorHalos(gtx)
+	u.handleQuality(gtx)
 	if u.comparison.fit.Clicked(gtx) {
 		u.fitActiveView(false)
 	}
@@ -702,6 +706,8 @@ func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
 	u.colorHalo.source, u.colorHalo.candidate = nil, nil
 	u.colorHalo.images = [2][nPrev]paint.ImageOp{}
 	u.colorHalo.panels = [2]panel{}
+	u.quality.source = nil
+	u.quality.data = qualityReport{}
 	u.result = m
 	for i, p := range pv {
 		u.resPrev[i] = paint.NewImageOp(p)
@@ -892,7 +898,12 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 				gtx = gtx.Disabled()
 			}
 			return checkBox(th, &u.comparison.enabled, "До / После результата").Layout(gtx)
-		}), sp, btn(&u.comparison.fit, "Вписать"), btn(&u.comparison.native, "100%"))
+		}), sp, btn(&u.comparison.fit, "Вписать"), btn(&u.comparison.native, "100%"), sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if u.busy || u.result == nil {
+				gtx = gtx.Disabled()
+			}
+			return material.Button(th, &u.quality.open, "Отчёт качества…").Layout(gtx)
+		}))
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(row1), row(row2), row(row3), row(row4))
 	})
 }
