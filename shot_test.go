@@ -30,7 +30,7 @@ func TestShot(t *testing.T) {
 			sz = image.Pt(1200, 700)
 		}
 	}
-	if os.Getenv("SHOTRESTORE") != "" || os.Getenv("SHOTGRADIENT") != "" || os.Getenv("SHOTHALO") != "" || os.Getenv("SHOTWIPE") != "" || os.Getenv("SHOTQUALITY") != "" {
+	if os.Getenv("SHOTRESTORE") != "" || os.Getenv("SHOTGRADIENT") != "" || os.Getenv("SHOTHALO") != "" || os.Getenv("SHOTWIPE") != "" || os.Getenv("SHOTQUALITY") != "" || os.Getenv("SHOTNOISE") != "" {
 		sz = image.Pt(1200, 750)
 	}
 	w, err := headless.NewWindow(sz.X, sz.Y)
@@ -43,6 +43,22 @@ func TestShot(t *testing.T) {
 	u := &ui{th: th, rows: 2, cols: 2, tiles: map[cell]*tileState{}, points: map[cellPair][]PointPair{}, pairBtns: map[cellPair]*widget.Clickable{}}
 	u.link.Value, u.chAlign.Value, u.lfit.Value, u.bgEq.Value = true, true, true, true
 	u.overlapSl.Value = 15.0 / maxOverlap
+	if os.Getenv("SHOTNOISE") != "" {
+		_, m := waveTestImage(384, 384)
+		model := estimateWaveModel(m)
+		p := standardWaveParams()
+		after := filterWaveRegion(m, model, p, image.Rect(0, 0, m.W, m.H), nil)
+		pv := restorationPreviews(m, after)
+		u.result, u.view, u.stretch.Value = m, 9, true
+		u.noise = noiseState{source: m, model: model, params: p, cached: p, hasPreview: true, region: image.Rect(0, 0, m.W, m.H), note: "Проба Starlet; проверьте удалённый сигнал", panels: [2]panel{{needFit: true}, {needFit: true}}}
+		for side := range pv {
+			for mode, im := range pv[side] {
+				u.noise.images[side][mode] = paint.NewImageOp(im)
+			}
+		}
+		u.noise.residual = paint.NewImageOp(preview(removedSignal(m, after), 384, prevLinear))
+	}
+
 	if os.Getenv("SHOTQUALITY") != "" {
 		m := haloTestImage()
 		out, _, err := correctColorHalos(m, .75)
@@ -104,7 +120,7 @@ func TestShot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p := restorationParams{5, .35}
+		p := restorationParams{iterations: 5, fraction: .35}
 		region := image.Rect(0, 0, m.W, m.H)
 		if spatial {
 			region = restorationPreviewRect(m, model.stars, nil)

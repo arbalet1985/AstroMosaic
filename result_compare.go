@@ -33,6 +33,9 @@ func (u *ui) fitActiveView(native bool) {
 	case 6:
 		p = &u.gradient.panels[0]
 		size = u.gradient.images[0][u.si()].Size()
+	case 9:
+		p = &u.noise.panels[0]
+		size = u.noise.images[0][u.si()].Size()
 	case 7:
 		p = &u.colorHalo.panels[0]
 		size = u.colorHalo.images[0][u.si()].Size()

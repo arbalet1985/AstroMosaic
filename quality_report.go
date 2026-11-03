@@ -11,6 +11,7 @@ type qualityStar struct {
 	Changed            bool
 }
 type qualityReport struct {
+	Operations       []string
 	W, H, C          int
 	Changed, Invalid int
 	Area             [1600]int
@@ -18,10 +19,11 @@ type qualityReport struct {
 	Stars            []qualityStar
 	Profiles         [2][][]float64
 	Recommendations  []string
+	ScalePower       [2][waveLevels]float64
 }
 
 func measureQuality(before, after *Img) qualityReport {
-	r := qualityReport{W: after.W, H: after.H, C: after.C}
+	r := qualityReport{W: after.W, H: after.H, C: after.C, Operations: append([]string(nil), after.Operations...)}
 	for t, m := range []*Img{before, after} {
 		r.Flux[t] = make([]float64, m.C)
 		r.Noise[t] = make([]float64, m.C)
@@ -151,6 +153,7 @@ func measureQuality(before, after *Img) qualityReport {
 			}
 		}
 	}
+	r.ScalePower[0], r.ScalePower[1] = waveScalePower(before), waveScalePower(after)
 	r.Recommendations = qualityRecommendations(r)
 	return r
 }
@@ -217,11 +220,15 @@ func qualityRecommendations(r qualityReport) []string {
 		tips = append(tips, fmt.Sprintf("Эллиптичность достигает %.2f: откройте диагностику поля/карту PSF. Эллиптическую модель или кому выбирайте после проверки формы; одной эллиптичности недостаточно для диагноза комы.", ell))
 	}
 	if width > 3 && !noisy {
-		tips = append(tips, fmt.Sprintf("Ширина звёзд до %.2f px: можно проверить слабую деконволюцию с 3–5 итерациями. Цель — уменьшение ширины при стабильных потоке и шуме; крупная звезда сама по себе не доказывает дефокус.", width))
+		tips = append(tips, fmt.Sprintf("Ширина звёзд до %.2f px: сначала проверьте «Шум / детали…» с единичными усилениями, затем можно проверить слабую деконволюцию с 3–5 итерациями. Цель — уменьшение ширины при стабильных потоке и шуме; крупная звезда сама по себе не доказывает дефокус.", width))
 	}
 	if float64(r.Changed)/float64(r.W*r.H) < .02 {
 		tips = append(tips, "Изменено менее 2% площади: общий вид может почти не отличаться. Смотрите звёзды при 100% и метрики изменённых участков; это не основание повышать силу всех коррекций.")
 	}
 	tips = append(tips, "Градиент и виньетирование не диагностируются по звёздам. Если фон неоднороден, проверьте модель «Градиент фона…» с исключённой туманностью; master flat применяйте только при подходящем калибровочном кадре.")
 	return tips
+}
+
+func recordProcessing(source, out *Img, name string) {
+	out.Operations = append(append([]string(nil), source.Operations...), name)
 }

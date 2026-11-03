@@ -90,7 +90,7 @@ func TestSpatialPSFFitAndRestoration(t *testing.T) {
 	if model.spatial.nodes[0].cov.xx >= model.spatial.nodes[3].cov.xx {
 		t.Fatal("field-dependent PSF was not measured")
 	}
-	p := restorationParams{5, .5}
+	p := restorationParams{iterations: 5, fraction: .5}
 	out := restoreImage(m, model, p, nil)
 	note, err := assessRestorationModel(m, out, model, image.Point{})
 	t.Log(note)
@@ -130,7 +130,7 @@ func TestSpatialPSFSparseCoverage(t *testing.T) {
 	if model.spatial.confidence(300, 300) != 0 {
 		t.Fatal("unmeasured cell acquired a model")
 	}
-	out := restoreSpatialRegion(m, model, restorationParams{3, .35}, image.Rect(190, 210, 410, 390), nil)
+	out := restoreSpatialRegion(m, model, restorationParams{iterations: 3, fraction: .35}, image.Rect(190, 210, 410, 390), nil)
 	for y := 210; y < 390; y++ {
 		for x := 200; x < 400; x++ {
 			if out.at(0, x-190, y-210) != m.at(0, x, y) {
@@ -157,7 +157,7 @@ func TestSpatialRGBAndFlatField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := restoreImage(m, model, restorationParams{5, .35}, nil)
+	out := restoreImage(m, model, restorationParams{iterations: 5, fraction: .35}, nil)
 	for i := 0; i < n; i++ {
 		if math.Abs(float64(m.Pix[i])/float64(m.Pix[n+i])-float64(out.Pix[i])/float64(out.Pix[n+i])) > 1e-6 {
 			t.Fatal("overlap blending changed RGB ratios")
@@ -176,7 +176,7 @@ func TestSpatialRGBAndFlatField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out = restoreImage(flat, mono, restorationParams{3, .35}, nil)
+	out = restoreImage(flat, mono, restorationParams{iterations: 3, fraction: .35}, nil)
 	for i, v := range out.Pix {
 		if v != flat.Pix[i] {
 			t.Fatal("patch blending produced a flat-field seam")
@@ -201,14 +201,14 @@ func TestSpatialPSFRealPreview(t *testing.T) {
 	}
 	t.Log(model.spatial.summary())
 	region := restorationPreviewRect(m, model.stars, nil)
-	out := restoreSpatialRegion(m, model, restorationParams{5, .35}, region, nil)
+	out := restoreSpatialRegion(m, model, restorationParams{iterations: 5, fraction: .35}, region, nil)
 	note, err := assessRestorationModel(cropPixels(m, region), out, model, region.Min)
 	t.Log(note)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if os.Getenv("RESTORE_FULL_SPATIAL_REAL") != "" {
-		full := restoreImage(m, model, restorationParams{5, .35}, nil)
+		full := restoreImage(m, model, restorationParams{iterations: 5, fraction: .35}, nil)
 		note, err := assessRestorationModel(m, full, model, image.Point{})
 		t.Log("whole real tile:", note)
 		if err != nil {

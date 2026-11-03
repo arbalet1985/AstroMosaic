@@ -16,7 +16,7 @@ func TestRestorationGaussian(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := restoreImage(m, model, restorationParams{5, .5}, nil)
+	out := restoreImage(m, model, restorationParams{iterations: 5, fraction: .5}, nil)
 	note, err := assessRestoration(m, out, model.stars)
 	t.Log(note)
 	if err != nil {
@@ -47,7 +47,7 @@ func TestRestorationApproachesKnownLatentImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := restoreImage(m, model, restorationParams{5, .5}, nil)
+	out := restoreImage(m, model, restorationParams{iterations: 5, fraction: .5}, nil)
 	var beforeError, afterError float64
 	for i, want := range truth.Pix {
 		beforeError += math.Pow(float64(m.Pix[i]-want), 2)
@@ -74,7 +74,7 @@ func TestRestorationNoiseAndProtectedPixels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := restoreImage(m, model, restorationParams{5, .5}, nil)
+	out := restoreImage(m, model, restorationParams{iterations: 5, fraction: .5}, nil)
 	for c := 0; c < m.C; c++ {
 		for _, p := range []int{0, 30*m.W + 30, 31*m.W + 30, 200*m.W + 200, 200*m.W + 205} {
 			if out.Pix[c*n+p] != m.Pix[c*n+p] {
@@ -96,7 +96,7 @@ func TestRestorationPreviewMatchesFull(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p := restorationParams{5, .5}
+		p := restorationParams{iterations: 5, fraction: .5}
 		full := restoreImage(m, model, p, nil)
 		region := image.Rect(120, 120, 280, 280)
 		halo := 2 * restorationRadius(model, p) * (p.iterations + 2)
@@ -139,7 +139,7 @@ func TestRestorationRealPreview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := restorationParams{5, .35}
+	p := restorationParams{iterations: 5, fraction: .35}
 	region := restorationPreviewRect(m, model.stars, nil)
 	halo := 2 * restorationRadius(model, p) * (p.iterations + 2)
 	context := region.Inset(-halo).Intersect(image.Rect(0, 0, m.W, m.H))

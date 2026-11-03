@@ -14,6 +14,10 @@ import (
 )
 
 type restorationState struct {
+	regularization                                           widget.Bool
+	residualBtn                                              widget.Clickable
+	residual                                                 paint.ImageOp
+	showResidual                                             bool
 	open, preview, apply, iterations, strength, mode, mapBtn widget.Clickable
 	colorBtn, mapChannelBtn                                  widget.Clickable
 	profile, cachedProfile, independent, cachedIndependent   bool
@@ -40,11 +44,15 @@ func (s *restorationState) settings() restorationParams {
 	if p.fraction == 0 {
 		p.fraction = .35
 	}
+	p.regularize = s.regularization.Value
 	return p
 }
 
 func (u *ui) handleRestoration(gtx layout.Context) {
 	s := &u.restoration
+	if s.residualBtn.Clicked(gtx) {
+		s.showResidual = !s.showResidual
+	}
 	if s.open.Clicked(gtx) && !u.busy {
 		u.view = 5
 		if u.result != nil && s.source != u.result {
@@ -185,6 +193,7 @@ func (u *ui) previewRestoration() {
 			note = "Проба прошла проверку. " + note
 		}
 		pv := restorationPreviews(before, after)
+		removed := preview(removedSignal(before, after), max(before.W, before.H), prevLinear)
 		var psfMap *image.RGBA
 		if model.spatial != nil {
 			psfMap = spatialPSFImage(model.spatial)
@@ -193,6 +202,7 @@ func (u *ui) previewRestoration() {
 			u.busy = false
 			s.source, s.model, s.modelValid = source, model, true
 			s.region, s.cachedParams, s.approved, s.hasPreview, s.note = region, p, approved, true, note
+			s.residual = paint.NewImageOp(removed)
 			s.cachedSpatial = spatial
 			s.cachedComa = coma
 			s.cachedProfile, s.cachedIndependent = profile, independent
@@ -243,6 +253,7 @@ func (u *ui) applyRestoration() {
 		pv := previews(out, previewSide)
 		u.post(func() {
 			u.busy = false
+			recordProcessing(source, out, fmt.Sprintf("Деконволюция; итераций %d; доля %.0f%%; Starlet-регуляризация %t", p.iterations, 100*p.fraction, p.regularize))
 			u.pushHistory(source)
 			u.setResult(out, pv)
 			u.sel = nil
@@ -310,6 +321,12 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 				)
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if u.busy {
+					gtx = gtx.Disabled()
+				}
+				return layout.Flex{}.Layout(gtx, layout.Rigid(checkBox(u.th, &s.regularization, "Starlet-регуляризация").Layout), layout.Rigid(material.Button(u.th, &s.residualBtn, "После / удалённый сигнал").Layout))
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				note := s.note
 				if s.source != u.result {
 					note = "Результат изменился — рассчитайте новую пробу."
@@ -353,7 +370,11 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 							layout.Rigid(material.Body2(u.th, fmt.Sprintf("%s — участок (%d,%d), %d×%d", []string{"До", "После"}[side], s.region.Min.X, s.region.Min.Y, s.region.Dx(), s.region.Dy())).Layout),
 							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								return u.zoomView(gtx, &s.panels[side], s.images[side][u.si()], func(_ f32.Point, _ pointer.Buttons) {}, nil)
+								img := s.images[side][u.si()]
+								if side == 1 && s.showResidual {
+									img = s.residual
+								}
+								return u.zoomView(gtx, &s.panels[side], img, func(_ f32.Point, _ pointer.Buttons) {}, nil)
 							}),
 						)
 					})
