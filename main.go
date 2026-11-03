@@ -47,14 +47,20 @@ type tileState struct {
 
 // panel is one zoomable image view in the points editor.
 type panel struct {
-	zoom    float32
-	pan     f32.Point
-	needFit bool
-	press   f32.Point
-	last    f32.Point
-	button  pointer.Buttons
-	drag    bool
-	own     bool // the current left drag belongs to dragHooks, not to panning
+	detail       *detailView
+	leader, peer *panel
+	click        func(f32.Point, pointer.Buttons)
+	hooks        *dragHooks
+	nativeSize   image.Point
+	oneToOne     bool
+	zoom         float32
+	pan          f32.Point
+	needFit      bool
+	press        f32.Point
+	last         f32.Point
+	button       pointer.Buttons
+	drag         bool
+	own          bool // the current left drag belongs to dragHooks, not to panning
 }
 
 // dragHooks lets a view take over left-button drags (drawing a frame); panning then uses the
@@ -137,13 +143,16 @@ type ui struct {
 	cur      *cellPair
 	panels   [2]panel
 
-	result   *Img
-	resPrev  [nPrev]paint.ImageOp
-	resPrevW int
-	resPanel panel
-	history  []*Img // undo for geometry, restoration and background operations
-	busy     bool
-	status   string
+	result          *Img
+	resPrev         [nPrev]paint.ImageOp
+	resPrevW        int
+	resPanel        panel
+	baseline        *Img
+	baselineHistory []*Img
+	comparison      resultComparison
+	history         []*Img // undo for geometry, restoration and background operations
+	busy            bool
+	status          string
 
 	// frame / rotation (Siril-style) on the result
 	sel                                    *frame
@@ -274,6 +283,12 @@ func (u *ui) handle(gtx layout.Context) {
 	u.handleRestoration(gtx)
 	u.handleGradient(gtx)
 	u.handleColorHalos(gtx)
+	if u.comparison.fit.Clicked(gtx) {
+		u.fitActiveView(false)
+	}
+	if u.comparison.native.Clicked(gtx) {
+		u.fitActiveView(true)
+	}
 	u.handleFlat(gtx)
 	if u.diagBtn.Clicked(gtx) {
 		u.view = 4
@@ -587,6 +602,7 @@ func (u *ui) stitch() {
 				u.busy = false
 				u.setResult(input, pv)
 				u.history = nil
+				u.baseline, u.baselineHistory = nil, nil
 				u.sel = nil
 				u.view = 2
 				u.weak = nil
@@ -646,6 +662,7 @@ func (u *ui) stitch() {
 			u.diagnostics, u.diagIndex = diagnostics, 0
 			u.diagPanels = [2]panel{{needFit: true}, {needFit: true}}
 			u.history, u.sel = nil, nil
+			u.baseline, u.baselineHistory = nil, nil
 			u.view = 2
 			u.weak = nil
 			for _, k := range weak {
@@ -673,6 +690,7 @@ func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
 	u.restoration.images = [2][nPrev]paint.ImageOp{}
 	u.restoration.psfMap = paint.ImageOp{}
 	u.restoration.showMap = false
+	u.restoration.panels = [2]panel{}
 	if m.C != 3 {
 		u.restoration.independent = false
 	}
@@ -680,14 +698,17 @@ func (u *ui) setResult(m *Img, pv [nPrev]*image.RGBA) {
 	u.gradient.valid = false
 	u.gradient.images = [2][nPrev]paint.ImageOp{}
 	u.gradient.modelImage = paint.ImageOp{}
+	u.gradient.panels = [2]panel{}
 	u.colorHalo.source, u.colorHalo.candidate = nil, nil
 	u.colorHalo.images = [2][nPrev]paint.ImageOp{}
+	u.colorHalo.panels = [2]panel{}
 	u.result = m
 	for i, p := range pv {
 		u.resPrev[i] = paint.NewImageOp(p)
 	}
 	u.resPrevW = pv[0].Bounds().Dx()
 	u.resPanel.needFit = true
+	u.prepareResultComparison()
 }
 
 // save writes the linear result: Авторастяжение and Связать каналы only affect the preview.
@@ -866,6 +887,12 @@ func (u *ui) toolbar(gtx layout.Context) layout.Dimensions {
 			}
 			return material.Button(th, &u.colorHalo.open, "Цветные ореолы…").Layout(gtx)
 		})}
+		row4 = append(row4, sp, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if u.result == nil || u.baseline == u.result || !u.comparison.ready {
+				gtx = gtx.Disabled()
+			}
+			return checkBox(th, &u.comparison.enabled, "До / После результата").Layout(gtx)
+		}), sp, btn(&u.comparison.fit, "Вписать"), btn(&u.comparison.native, "100%"))
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, row(row1), row(row2), row(row3), row(row4))
 	})
 }
@@ -1111,15 +1138,34 @@ func (u *ui) resultView(gtx layout.Context) layout.Dimensions {
 		return f32.Pt(float32(p[0]), float32(p[1])).Div(scale).Mul(pn.zoom).Add(pn.pan)
 	}
 	click := func(_ f32.Point, b pointer.Buttons) {
-		if b.Contain(pointer.ButtonPrimary) {
+		if b.Contain(pointer.ButtonPrimary) && !u.comparison.dragging {
 			u.sel = nil // like Siril: a plain click drops the selection
 		}
 	}
 	hooks := &dragHooks{
-		press: func(pos f32.Point) bool { u.selPress(toFull(pos), float64(8*scale/pn.zoom)); return true },
-		drag:  func(pos f32.Point) { u.selMove(toFull(pos)) },
+		press: func(pos f32.Point) bool {
+			if u.wipePress(pos, gtx.Constraints.Max.X) {
+				return true
+			}
+			u.selPress(toFull(pos), float64(8*scale/pn.zoom))
+			return true
+		},
+		drag: func(pos f32.Point) {
+			if u.comparison.dragging {
+				u.comparison.fraction = max(0, min(1, pos.X/float32(gtx.Constraints.Max.X)))
+			} else {
+				u.selMove(toFull(pos))
+			}
+		},
 	}
-	dims := u.zoomView(gtx, pn, u.resPrev[u.si()], click, hooks)
+	img := u.resPrev[u.si()]
+	if u.comparison.ready && u.baseline != u.result {
+		img = u.comparison.images[1][u.si()]
+	}
+	dims := u.zoomView(gtx, pn, img, click, hooks)
+	if u.hasWipe() {
+		u.drawResultWipe(gtx)
+	}
 
 	f, ok := u.effFrame()
 	if !ok {
@@ -1165,60 +1211,51 @@ func (u *ui) resultView(gtx layout.Context) layout.Dimensions {
 func (u *ui) zoomView(gtx layout.Context, pn *panel, img paint.ImageOp, click func(f32.Point, pointer.Buttons), hooks *dragHooks) layout.Dimensions {
 	size := gtx.Constraints.Max
 	isz := img.Size()
-	if pn.needFit || pn.zoom == 0 {
+	if isz.X == 0 || isz.Y == 0 {
+		return layout.Dimensions{Size: size}
+	}
+	if pn.leader == nil && (pn.needFit || pn.zoom == 0) {
 		pn.zoom = float32(math.Min(float64(size.X)/float64(isz.X), float64(size.Y)/float64(isz.Y)))
 		pn.pan = f32.Pt((float32(size.X)-float32(isz.X)*pn.zoom)/2, (float32(size.Y)-float32(isz.Y)*pn.zoom)/2)
 		pn.needFit = false
 	}
-	for {
-		ev, ok := gtx.Event(pointer.Filter{Target: pn, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll,
-			ScrollY: pointer.ScrollRange{Min: -1e6, Max: 1e6}})
-		if !ok {
-			break
+	pn.click, pn.hooks = click, hooks
+	if pn.leader == nil {
+		updatePanel(gtx, pn, pn)
+		if pn.peer != nil {
+			updatePanel(gtx, pn.peer, pn)
 		}
-		e, ok := ev.(pointer.Event)
-		if !ok {
-			continue
-		}
-		switch e.Kind {
-		case pointer.Press:
-			pn.press, pn.last, pn.button, pn.drag = e.Position, e.Position, e.Buttons, false
-			pn.own = hooks != nil && e.Buttons.Contain(pointer.ButtonPrimary) && hooks.press(e.Position)
-		case pointer.Drag:
-			if d := e.Position.Sub(pn.press); d.X*d.X+d.Y*d.Y > 16 {
-				pn.drag = true
-			}
-			if pn.drag && pn.own {
-				hooks.drag(e.Position)
-			} else if pn.drag {
-				pn.pan = pn.pan.Add(e.Position.Sub(pn.last))
-			}
-			pn.last = e.Position
-		case pointer.Release:
-			if !pn.drag {
-				click(e.Position, pn.button)
-			}
-			pn.own = false
-		case pointer.Scroll:
-			f := float32(1.2)
-			if e.Scroll.Y > 0 {
-				f = 1 / f
-			}
-			pn.pan = e.Position.Sub(e.Position.Sub(pn.pan).Mul(f))
-			pn.zoom *= f
-		}
+	} else {
+		pn.zoom, pn.pan, pn.needFit = pn.leader.zoom, pn.leader.pan, false
+	}
+	if pn.oneToOne && pn.nativeSize.X > 0 {
+		z := float32(pn.nativeSize.X) / float32(isz.X)
+		centre := f32.Pt(float32(size.X)/2, float32(size.Y)/2)
+		pn.pan = centre.Sub(centre.Sub(pn.pan).Mul(z / pn.zoom))
+		pn.zoom, pn.oneToOne = z, false
 	}
 	defer clip.Rect{Max: size}.Push(gtx.Ops).Pop()
 	paint.Fill(gtx.Ops, color.NRGBA{A: 0xff})
 	event.Op(gtx.Ops, pn)
+	u.paintPanelImage(gtx, pn, img)
+	return layout.Dimensions{Size: size}
+}
+
+func (u *ui) paintPanelImage(gtx layout.Context, pn *panel, img paint.ImageOp) {
+	isz := img.Size()
+	if pn.detail.draw(gtx, pn, isz, u.si()) {
+		return
+	}
 	st := op.Affine(f32.Affine2D{}.Scale(f32.Point{}, f32.Pt(pn.zoom, pn.zoom)).Offset(pn.pan)).Push(gtx.Ops)
-	img.Filter = paint.FilterNearest
+	img.Filter = paint.FilterLinear
+	if pn.zoom >= 1 {
+		img.Filter = paint.FilterNearest
+	}
 	img.Add(gtx.Ops)
 	cr := clip.Rect{Max: isz}.Push(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
 	cr.Pop()
 	st.Pop()
-	return layout.Dimensions{Size: size}
 }
 
 // ---------- frame & rotation ----------
@@ -1339,17 +1376,20 @@ func (u *ui) geom(name string, op func(*Img) *Img) {
 	if u.busy || u.result == nil {
 		return
 	}
-	res := u.result
+	res, base := u.result, u.baseline
 	u.busy = true
 	u.status = name + "…"
 	go func() {
 		out := op(res)
+		original := out
+		if base != nil && base != res {
+			original = op(base)
+		}
 		pv := previews(out, previewSide)
 		u.post(func() {
 			u.busy = false
-			if u.history = append(u.history, res); len(u.history) > 3 { // each step is a full-size copy
-				u.history = u.history[1:]
-			}
+			u.pushHistory(res)
+			u.baseline = original
 			u.setResult(out, pv)
 			u.sel = nil
 			u.angleEd.SetText("0")
@@ -1424,12 +1464,15 @@ func (u *ui) handleGeom(gtx layout.Context) {
 	}
 	if u.undo.Clicked(gtx) && !u.busy && len(u.history) > 0 {
 		prev := u.history[len(u.history)-1]
+		base := u.baselineHistory[len(u.baselineHistory)-1]
+		u.baselineHistory = u.baselineHistory[:len(u.baselineHistory)-1]
 		u.history = u.history[:len(u.history)-1]
 		u.busy = true
 		go func() {
 			pv := previews(prev, previewSide)
 			u.post(func() {
 				u.busy = false
+				u.baseline = base
 				u.setResult(prev, pv)
 				u.sel = nil
 				u.status = fmt.Sprintf("Отменено: %d×%d", prev.W, prev.H)

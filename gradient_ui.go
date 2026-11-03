@@ -9,11 +9,29 @@ import (
 	"gioui.org/f32"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
+	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 )
+
+func drawGradientSamples(gtx layout.Context, pn *panel, size image.Point, s *gradientState) {
+	defer clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops).Pop()
+	for i, sample := range s.model.samples {
+		col := color.NRGBA{R: 30, G: 230, B: 80, A: 255}
+		if sample.excluded || !sample.valid {
+			col = color.NRGBA{R: 255, G: 180, B: 25, A: 255}
+		}
+		if s.mask[i] {
+			col = color.NRGBA{R: 255, G: 45, B: 70, A: 255}
+		}
+		x := int(float32(sample.x*float64(size.X)/float64(s.source.W))*pn.zoom + pn.pan.X)
+		y := int(float32(sample.y*float64(size.Y)/float64(s.source.H))*pn.zoom + pn.pan.Y)
+		paint.FillShape(gtx.Ops, col, clip.Rect{Min: image.Pt(x-3, y), Max: image.Pt(x+4, y+1)}.Op())
+		paint.FillShape(gtx.Ops, col, clip.Rect{Min: image.Pt(x, y-3), Max: image.Pt(x+1, y+4)}.Op())
+	}
+}
 
 type gradientState struct {
 	open, preview, apply, reset, modelBtn widget.Clickable
@@ -44,22 +62,21 @@ func gradientThumbnail(m *Img) *Img {
 
 func gradientPreviews(m *Img, g gradientModel, mask [400]bool) ([2][nPrev]*image.RGBA, *image.RGBA) {
 	before := gradientThumbnail(m)
-	after := newImg(before.W, before.H, before.C)
 	lo, hi := 0.0, 0.0
 	for c := 0; c < before.C; c++ {
 		for y := 0; y < before.H; y++ {
 			for x := 0; x < before.W; x++ {
-				i := c*before.W*before.H + y*before.W + x
 				v := g.surface(c, float64(x)*float64(m.W-1)/float64(max(1, before.W-1)), float64(y)*float64(m.H-1)/float64(max(1, before.H-1))) - g.level[c]
 				lo, hi = math.Min(lo, v), math.Max(hi, v)
-				after.Pix[i] = before.Pix[i]
-				if before.Pix[i] != 0 {
-					after.Pix[i] -= float32(v)
-				}
 			}
 		}
 	}
-	pv := restorationPreviews(before, after)
+	var pv [2][nPrev]*image.RGBA
+	tones := imageTones(m)
+	for mode := 0; mode < nPrev; mode++ {
+		pv[0][mode] = renderDisplay(m, image.Rect(0, 0, m.W, m.H), image.Pt(before.W, before.H), tones[mode], nil)
+		pv[1][mode] = renderDisplay(m, image.Rect(0, 0, m.W, m.H), image.Pt(before.W, before.H), tones[mode], &g)
+	}
 	modelImg := image.NewRGBA(image.Rect(0, 0, before.W, before.H))
 	span := math.Max(math.Abs(lo), math.Abs(hi))
 	if span == 0 {
@@ -76,26 +93,6 @@ func gradientPreviews(m *Img, g gradientModel, mask [400]bool) ([2][nPrev]*image
 				col.B += a
 			}
 			modelImg.SetRGBA(x, y, col)
-		}
-	}
-	for i, s := range g.samples {
-		col := color.RGBA{30, 230, 80, 255}
-		if s.excluded || !s.valid {
-			col = color.RGBA{255, 180, 25, 255}
-		}
-		if mask[i] {
-			col = color.RGBA{255, 45, 70, 255}
-		}
-		x, y := int(s.x*float64(before.W)/float64(m.W)), int(s.y*float64(before.H)/float64(m.H))
-		for d := -3; d <= 3; d++ {
-			for _, q := range []image.Point{{x + d, y}, {x, y + d}} {
-				if q.In(modelImg.Bounds()) {
-					modelImg.SetRGBA(q.X, q.Y, col)
-					for mode := range pv[0] {
-						pv[0][mode].SetRGBA(q.X, q.Y, col)
-					}
-				}
-			}
 		}
 	}
 	return pv, modelImg
@@ -128,7 +125,7 @@ func (u *ui) handleGradient(gtx layout.Context) {
 	}
 	if s.modelBtn.Clicked(gtx) {
 		s.showModel = !s.showModel
-		s.panels[1].needFit = true
+		s.panels[0].needFit = true
 	}
 	if s.apply.Clicked(gtx) && !u.busy && s.valid && !s.dirty && s.source == u.result {
 		source, model := u.result, s.model
@@ -139,10 +136,7 @@ func (u *ui) handleGradient(gtx layout.Context) {
 			pv := previews(out, previewSide)
 			u.post(func() {
 				u.busy = false
-				u.history = append(u.history, source)
-				if len(u.history) > 3 {
-					u.history = u.history[1:]
-				}
+				u.pushHistory(source)
 				u.setResult(out, pv)
 				u.sel = nil
 				u.angleEd.SetText("0")
@@ -180,6 +174,9 @@ func (u *ui) previewGradient() {
 			}
 			s.modelImage = paint.NewImageOp(modelImg)
 			s.panels = [2]panel{{needFit: true}, {needFit: true}}
+			tones := imageTones(source)
+			s.panels[0].detail = &detailView{source: source, tones: tones, mode: -1}
+			s.panels[1].detail = &detailView{source: source, tones: tones, gradient: &s.model, mode: -1}
 			u.status = s.note
 		})
 	}()
@@ -217,6 +214,7 @@ func (u *ui) gradientView(gtx layout.Context) layout.Dimensions {
 				if s.source != u.result || s.images[0][u.si()].Size().X == 0 {
 					return layout.Center.Layout(gtx, material.Body1(u.th, "Рассчитайте модель фона").Layout)
 				}
+				linkPanels(&s.panels)
 				var children []layout.FlexChild
 				for side := 0; side < 2; side++ {
 					children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -227,7 +225,11 @@ func (u *ui) gradientView(gtx layout.Context) layout.Dimensions {
 							label = "Модель канала L/R: красный вычитается, синий добавляется"
 						}
 						return layout.Flex{Axis: layout.Vertical}.Layout(gtx, layout.Rigid(material.Body2(u.th, label).Layout), layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							return u.zoomView(gtx, &s.panels[side], img, func(pt f32.Point, btn pointer.Buttons) {
+							detail := s.panels[side].detail
+							if side == 1 && s.showModel {
+								s.panels[side].detail = nil
+							}
+							dims := u.zoomView(gtx, &s.panels[side], img, func(pt f32.Point, btn pointer.Buttons) {
 								if side != 0 || u.busy || !btn.Contain(pointer.ButtonPrimary) {
 									return
 								}
@@ -242,14 +244,13 @@ func (u *ui) gradientView(gtx layout.Context) layout.Dimensions {
 								s.dirty = true
 								s.valid = false
 								s.note = fmt.Sprintf("Исключение [%d,%d] изменено — пересчитайте модель.", i/20+1, i%20+1)
-								pv, modelImg := gradientPreviews(u.result, s.model, s.mask)
-								for side := range pv {
-									for mode, im := range pv[side] {
-										s.images[side][mode] = paint.NewImageOp(im)
-									}
-								}
-								s.modelImage = paint.NewImageOp(modelImg)
+
 							}, nil)
+							s.panels[side].detail = detail
+							if side == 0 || s.showModel {
+								drawGradientSamples(gtx, &s.panels[side], img.Size(), s)
+							}
+							return dims
 						}))
 					}))
 				}
