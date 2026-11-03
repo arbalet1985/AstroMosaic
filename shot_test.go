@@ -30,7 +30,7 @@ func TestShot(t *testing.T) {
 			sz = image.Pt(1200, 700)
 		}
 	}
-	if os.Getenv("SHOTRESTORE") != "" || os.Getenv("SHOTGRADIENT") != "" || os.Getenv("SHOTHALO") != "" || os.Getenv("SHOTWIPE") != "" {
+	if os.Getenv("SHOTRESTORE") != "" || os.Getenv("SHOTGRADIENT") != "" || os.Getenv("SHOTHALO") != "" || os.Getenv("SHOTWIPE") != "" || os.Getenv("SHOTQUALITY") != "" {
 		sz = image.Pt(1200, 750)
 	}
 	w, err := headless.NewWindow(sz.X, sz.Y)
@@ -43,6 +43,17 @@ func TestShot(t *testing.T) {
 	u := &ui{th: th, rows: 2, cols: 2, tiles: map[cell]*tileState{}, points: map[cellPair][]PointPair{}, pairBtns: map[cellPair]*widget.Clickable{}}
 	u.link.Value, u.chAlign.Value, u.lfit.Value, u.bgEq.Value = true, true, true, true
 	u.overlapSl.Value = 15.0 / maxOverlap
+	if os.Getenv("SHOTQUALITY") != "" {
+		m := haloTestImage()
+		out, _, err := correctColorHalos(m, .75)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := measureQuality(m, out)
+		u.result, u.view = out, 8
+		u.quality.source, u.quality.data = out, r
+	}
+
 	if os.Getenv("SHOTWIPE") != "" {
 		m := haloTestImage()
 		out, _, err := correctColorHalos(m, .75)
