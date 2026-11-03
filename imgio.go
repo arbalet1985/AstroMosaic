@@ -716,40 +716,13 @@ func previews(m *Img, maxSide int) [nPrev]*image.RGBA {
 	return [nPrev]*image.RGBA{preview(m, maxSide, prevLinear), preview(m, maxSide, prevLinked), preview(m, maxSide, prevUnlinked)}
 }
 
-// preview downsamples to maxSide (nearest) and optionally autostretches.
+// preview averages the source footprint for each overview pixel.
 func preview(m *Img, maxSide int, mode int) *image.RGBA {
 	k := max(1, (max(m.W, m.H)+maxSide-1)/maxSide)
-	pw, ph := m.W/k, m.H/k
-	out := image.NewRGBA(image.Rect(0, 0, pw, ph))
-	c0, mid := make([]float64, m.C), make([]float64, m.C)
+	size := image.Pt(max(1, m.W/k), max(1, m.H/k))
+	tone := displayTone{}
 	if mode != prevLinear {
-		c0, mid = stretchParams(m, mode == prevLinked)
+		tone.low, tone.mid = stretchParams(m, mode == prevLinked)
 	}
-	// Evaluate the original float samples: a 12-bit linear-domain LUT collapses
-	// faint backgrounds (~0.001) into just a few levels before stretching.
-	q := func(c int, sample float32) uint8 {
-		v := float64(sample)
-		if !finitePoint(v, 0) {
-			return 0
-		}
-		if mode != prevLinear {
-			v = mtf(v, mid[c], c0[c], 1)
-		}
-		v = math.Min(1, math.Max(0, v))
-		return uint8(v*255 + .5)
-	}
-	n := m.W * m.H
-	for y := 0; y < ph; y++ {
-		for x := 0; x < pw; x++ {
-			i := y*k*m.W + x*k
-			o := out.PixOffset(x, y)
-			r := q(0, m.Pix[i])
-			g, b := r, r
-			if m.C >= 3 {
-				g, b = q(1, m.Pix[n+i]), q(2, m.Pix[2*n+i])
-			}
-			out.Pix[o], out.Pix[o+1], out.Pix[o+2], out.Pix[o+3] = r, g, b, 255
-		}
-	}
-	return out
+	return renderDisplay(m, image.Rect(0, 0, m.W, m.H), size, tone, nil)
 }

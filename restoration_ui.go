@@ -115,25 +115,13 @@ func (u *ui) handleRestoration(gtx layout.Context) {
 	}
 }
 
-// Both sides use the same stretch parameters, calculated on their joined image.
+// Fix both sides to the source stretch; navigation never changes the tone curve.
 func restorationPreviews(before, after *Img) [2][nPrev]*image.RGBA {
-	joined := newImg(before.W*2, before.H, before.C)
-	for c := 0; c < before.C; c++ {
-		for y := 0; y < before.H; y++ {
-			row := joined.Pix[c*joined.W*joined.H+y*joined.W:][:joined.W]
-			copy(row, before.Pix[c*before.W*before.H+y*before.W:][:before.W])
-			copy(row[before.W:], after.Pix[c*after.W*after.H+y*after.W:][:after.W])
-		}
-	}
-	pv := previews(joined, 2*max(before.W, before.H))
+	tones := imageTones(before)
 	var out [2][nPrev]*image.RGBA
-	for side := 0; side < 2; side++ {
-		for mode, img := range pv {
-			piece := image.NewRGBA(image.Rect(0, 0, before.W, before.H))
-			for y := 0; y < before.H; y++ {
-				copy(piece.Pix[y*piece.Stride:][:before.W*4], img.Pix[y*img.Stride+side*before.W*4:][:before.W*4])
-			}
-			out[side][mode] = piece
+	for side, m := range []*Img{before, after} {
+		for mode := 0; mode < nPrev; mode++ {
+			out[side][mode] = renderDisplay(m, image.Rect(0, 0, m.W, m.H), image.Pt(m.W, m.H), tones[mode], nil)
 		}
 	}
 	return out
@@ -255,9 +243,7 @@ func (u *ui) applyRestoration() {
 		pv := previews(out, previewSide)
 		u.post(func() {
 			u.busy = false
-			if u.history = append(u.history, source); len(u.history) > 3 {
-				u.history = u.history[1:]
-			}
+			u.pushHistory(source)
 			u.setResult(out, pv)
 			u.sel = nil
 			u.angleEd.SetText("0")
@@ -360,6 +346,7 @@ func (u *ui) restorationView(gtx layout.Context) layout.Dimensions {
 				if !s.hasPreview || s.source != u.result {
 					return layout.Center.Layout(gtx, material.Body1(u.th, "Проба появится после расчёта").Layout)
 				}
+				linkPanels(&s.panels)
 				children := make([]layout.FlexChild, 2)
 				for side := range children {
 					children[side] = layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {

@@ -57,10 +57,7 @@ func (u *ui) handleColorHalos(gtx layout.Context) {
 			pv := previews(out, previewSide)
 			u.post(func() {
 				u.busy = false
-				u.history = append(u.history, source)
-				if len(u.history) > 3 {
-					u.history = u.history[1:]
-				}
+				u.pushHistory(source)
 				u.setResult(out, pv)
 				u.sel = nil
 				u.angleEd.SetText("0")
@@ -76,19 +73,24 @@ func (u *ui) refreshHaloPreviews() {
 	if s.source == nil || s.candidate == nil {
 		return
 	}
-	var before, after *Img
+	tones := imageTones(s.source)
+	region := s.region
+	size := region.Size()
 	if s.overview {
-		before, after = gradientThumbnail(s.source), gradientThumbnail(s.candidate)
-	} else {
-		before, after = cropPixels(s.source, s.region), cropPixels(s.candidate, s.region)
-	}
-	pv := restorationPreviews(before, after)
-	for side := range pv {
-		for mode, im := range pv[side] {
-			s.images[side][mode] = paint.NewImageOp(im)
-		}
+		region = image.Rect(0, 0, s.source.W, s.source.H)
+		k := max(1, (max(s.source.W, s.source.H)+previewSide-1)/previewSide)
+		size = image.Pt(max(1, s.source.W/k), max(1, s.source.H/k))
 	}
 	s.panels = [2]panel{{needFit: true}, {needFit: true}}
+	for side, m := range []*Img{s.source, s.candidate} {
+		for mode := 0; mode < nPrev; mode++ {
+			s.images[side][mode] = paint.NewImageOp(renderDisplay(m, region, size, tones[mode], nil))
+		}
+		if s.overview {
+			s.panels[side].detail = &detailView{source: m, tones: tones, mode: -1}
+		}
+	}
+
 }
 
 func (u *ui) previewColorHalos() {
@@ -153,6 +155,7 @@ func (u *ui) colorHaloView(gtx layout.Context) layout.Dimensions {
 				if s.candidate == nil {
 					return layout.Center.Layout(gtx, material.Body1(u.th, "Рассчитайте предварительный результат").Layout)
 				}
+				linkPanels(&s.panels)
 				var children []layout.FlexChild
 				for side := 0; side < 2; side++ {
 					children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
