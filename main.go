@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -171,6 +172,10 @@ type ui struct {
 }
 
 func main() {
+	if err := initSessionLog(); err != nil {
+		showLogError(err)
+		os.Exit(1)
+	}
 	go func() {
 		w := new(app.Window)
 		w.Option(app.Title("Astro Mosaic"), app.Size(unit.Dp(1200), unit.Dp(700)), app.Maximized.Option())
@@ -190,23 +195,34 @@ func main() {
 		u.chAlign.Value, u.lfit.Value, u.bgEq.Value = true, true, true
 		u.pairList.Axis = layout.Vertical
 		var ops op.Ops
+		var loggedStatus string
+		logUIStatus(u, &loggedStatus)
 		for {
 			e := w.Event()
 			u.expl.ListenEvents(e)
 			switch e := e.(type) {
 			case app.DestroyEvent:
+				if e.Err != nil {
+					log.Printf("WINDOW ERROR: %v", e.Err)
+					sessionLog.Sync()
+					os.Exit(1)
+				}
+				log.Print("SESSION END: window closed normally")
+				sessionLog.Sync()
 				os.Exit(0)
 			case app.FrameEvent:
 				for drained := false; !drained; {
 					select {
 					case f := <-u.tasks:
 						f()
+						logUIStatus(u, &loggedStatus)
 					default:
 						drained = true
 					}
 				}
 				gtx := app.NewContext(&ops, e)
 				u.layout(gtx)
+				logUIStatus(u, &loggedStatus)
 				e.Frame(gtx.Ops)
 			}
 		}
@@ -460,6 +476,7 @@ func (u *ui) open(k cell) {
 		}
 		path := f.(interface{ Name() string }).Name()
 		f.Close()
+		log.Printf("LOAD tile=%v path=%q", k, path)
 		u.post(func() { u.status = "Загрузка " + filepath.Base(path) + "…" })
 		img, err := loadImage(path)
 		if err != nil {
@@ -498,6 +515,7 @@ func (u *ui) openMany() {
 			paths = append(paths, f.(interface{ Name() string }).Name())
 			f.Close()
 		}
+		log.Printf("LOAD MANY paths=%q", paths)
 		if len(paths) > 100 {
 			u.post(func() { u.busy = false; u.status = "Не больше 100 плиток" })
 			return
@@ -773,6 +791,7 @@ func (u *ui) save() {
 		if ext := strings.ToLower(filepath.Ext(path)); ext != "."+sf.ext && !(sf.ext == "fits" && (ext == ".fit" || ext == ".fts")) && !(sf.ext == "tif" && ext == ".tiff") && !(sf.ext == "jpg" && ext == ".jpeg") {
 			path += "." + sf.ext // the chosen type decides the format, not a typed extension
 		}
+		log.Printf("SAVE path=%q format=%s size=%dx%d channels=%d", path, sf.label, res.W, res.H, res.C)
 		u.post(func() { u.status = "Сохраняю…"; u.format = k })
 		err := saveImage(path, res, sf.float)
 		u.post(func() {
