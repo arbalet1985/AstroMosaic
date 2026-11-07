@@ -11,23 +11,30 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 $exe = Join-Path $PSScriptRoot 'astro_mosaic.exe'
+$t0 = Get-Date
 
 Get-Process astro_mosaic -ErrorAction SilentlyContinue | Stop-Process -Force
 go build -trimpath -ldflags=-H=windowsgui -o $exe .
 if ($LASTEXITCODE -ne 0) { throw 'go build failed' }
 
-$t0 = Get-Date
 try {
     $p = Start-Process -FilePath $exe -PassThru
-    Start-Sleep -Seconds 6
+    # Defender can remediate a GUI build after the first few seconds of startup.
+    for ($second = 0; $second -lt 30 -and -not $p.HasExited; $second++) {
+        Start-Sleep -Seconds 1
+        $p.Refresh()
+    }
     $alive = -not $p.HasExited
     if ($alive) { Stop-Process -Id $p.Id -Force }
 } catch {
     $alive = $false
 }
 $hit = Get-MpThreatDetection -ErrorAction SilentlyContinue |
-    Where-Object { $_.InitialDetectionTime -gt $t0 -and ($_.Resources -join ' ') -like '*astro_mosaic*' }
+    Where-Object {
+        ($_.InitialDetectionTime -ge $t0 -or $_.LastThreatStatusChangeTime -ge $t0) -and
+        ($_.Resources -join ' ') -like '*astro_mosaic*'
+    }
 if (-not $alive -or $hit -or -not (Test-Path $exe)) {
-    throw 'Defender blocked astro_mosaic.exe at launch. Do not change Defender settings: change the build (see CLAUDE.md).'
+    throw 'astro_mosaic.exe failed the launch/Defender check. Do not change Defender settings: change the build (see AGENTS.md).'
 }
-"OK: $exe ($((Get-Item $exe).Length) bytes) starts and is not flagged"
+"OK: $exe ($((Get-Item $exe).Length) bytes) stays running for 30 seconds and is not flagged"

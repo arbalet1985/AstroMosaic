@@ -668,6 +668,39 @@ func placeMeasured(tiles []*Tile, points map[pairKey][]PointPair, overlap float6
 type halfPlane struct {
 	nx, ny, c float64
 	alongX    bool
+	wave      *seamWave
+	waveSign  float64
+}
+
+// Both sides of a seam share the same displacement in mosaic coordinates.
+// Opposite signs preserve the width of the blend strip, including rotated tiles.
+type seamWave struct {
+	tx, ty, amplitude, scale float64
+}
+
+func (w *seamWave) offset(X, Y float64) float64 {
+	t := (w.tx*X + w.ty*Y) / w.scale
+	noise := func(t float64) float64 {
+		i := math.Floor(t)
+		f := t - i
+		value := func(i float64) float64 {
+			x := uint64(int64(i)) + 0x9e3779b97f4a7c15
+			x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+			x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+			x ^= x >> 31
+			return float64(x>>11)/float64(uint64(1)<<53)*2 - 1
+		}
+		return value(i)*(1-f) + value(i+1)*f
+	}
+	return w.amplitude * (.6*noise(t) + .3*noise(3*t+17) + .1*noise(9*t+43))
+}
+
+func (c halfPlane) distance(X, Y float64) float64 {
+	d := c.c - (c.nx*X + c.ny*Y)
+	if c.wave != nil {
+		d += c.waveSign * c.wave.offset(X, Y)
+	}
+	return d
 }
 
 // region is the part of a tile used in the mosaic: the whole image less what the seams cut away.
@@ -685,7 +718,7 @@ func (r region) has(u, v, X, Y float64) bool {
 		return false
 	}
 	for _, c := range r.cuts {
-		if c.nx*X+c.ny*Y > c.c {
+		if c.distance(X, Y) < 0 {
 			return false
 		}
 	}
@@ -696,7 +729,7 @@ func (r region) has(u, v, X, Y float64) bool {
 func (r region) dist(u, v, X, Y float64) (dx, dy float64) {
 	dx, dy = math.Min(u, r.w-u), math.Min(v, r.h-v)
 	for _, c := range r.cuts {
-		if d := c.c - (c.nx*X + c.ny*Y); c.alongX {
+		if d := c.distance(X, Y); c.alongX {
 			dx = math.Min(dx, d)
 		} else {
 			dy = math.Min(dy, d)
@@ -711,7 +744,7 @@ func (r region) dist(u, v, X, Y float64) (dx, dy float64) {
 func (r region) depth(u, v, X, Y float64) float64 {
 	d := math.Max(r.w, r.h)
 	for _, c := range r.cuts {
-		d = math.Min(d, c.c-(c.nx*X+c.ny*Y))
+		d = math.Min(d, c.distance(X, Y))
 	}
 	const edgeBand = 64
 	e := math.Min(math.Min(u, r.w-u), math.Min(v, r.h-v))
@@ -746,6 +779,10 @@ func skyNeighbour(wa, wb Warp, ma, mb *Img) (ok, horiz, before bool) {
 // so the seam sits in the middle of the original overlap even where the tiles are turned against each
 // other, and at 0 the tiles meet exactly along the whole seam.
 func seamCuts(tiles []*Tile, W []Warp, overlap float64) []region {
+	return seamCutsWithRaggedEdge(tiles, W, overlap, false)
+}
+
+func seamCutsWithRaggedEdge(tiles []*Tile, W []Warp, overlap float64, ragged bool) []region {
 	R := make([]region, len(tiles))
 	for i, t := range tiles {
 		R[i] = full(t.Img)
@@ -753,6 +790,16 @@ func seamCuts(tiles []*Tile, W []Warp, overlap float64) []region {
 	}
 	axisX := func(w Warp, nx, ny float64) bool { // is the normal closer to the tile's x axis than to y?
 		return math.Abs(nx*w.S[0]+ny*w.S[3]) > math.Abs(nx*w.S[1]+ny*w.S[4])
+	}
+	addSeam := func(a, b int, nx, ny, c0, d float64) {
+		var wave *seamWave
+		if ragged && d > 0 {
+			// Stay within a fifth of the selected blend width; never widen the
+			// detail crossfade, which would create a strip with different noise.
+			wave = &seamWave{tx: -ny, ty: nx, amplitude: math.Min(48, d*.2), scale: math.Max(24, d*.8)}
+		}
+		R[a].cuts = append(R[a].cuts, halfPlane{nx: nx, ny: ny, c: c0 + d/2, alongX: axisX(W[a], nx, ny), wave: wave, waveSign: 1})
+		R[b].cuts = append(R[b].cuts, halfPlane{nx: -nx, ny: -ny, c: -(c0 - d/2), alongX: axisX(W[b], nx, ny), wave: wave, waveSign: -1})
 	}
 	for a := range tiles {
 		for b := a + 1; b < len(tiles); b++ {
@@ -770,8 +817,7 @@ func seamCuts(tiles []*Tile, W []Warp, overlap float64) []region {
 					nx, ny = nx/l, ny/l
 					c0 := nx*(ax+bx)/2 + ny*(ay+by)/2
 					d := overlap * math.Min(float64(ma.W), float64(ma.H))
-					R[a].cuts = append(R[a].cuts, halfPlane{nx, ny, c0 + d/2, axisX(W[a], nx, ny)})
-					R[b].cuts = append(R[b].cuts, halfPlane{-nx, -ny, -(c0 - d/2), axisX(W[b], nx, ny)})
+					addSeam(a, b, nx, ny, c0, d)
 				}
 				continue
 			}
@@ -806,8 +852,7 @@ func seamCuts(tiles []*Tile, W []Warp, overlap float64) []region {
 				nx, ny = -nx, -ny
 			}
 			c0 := nx*m1[0] + ny*m1[1]
-			R[a].cuts = append(R[a].cuts, halfPlane{nx, ny, c0 + d/2, axisX(W[a], nx, ny)})
-			R[b].cuts = append(R[b].cuts, halfPlane{-nx, -ny, -(c0 - d/2), axisX(W[b], nx, ny)})
+			addSeam(a, b, nx, ny, c0, d)
 		}
 	}
 	return R

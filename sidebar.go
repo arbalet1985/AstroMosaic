@@ -97,6 +97,12 @@ func (u *ui) sidebar(gtx layout.Context) layout.Dimensions {
 			}
 			return slider(&u.overlapSl)(gtx)
 		})
+		groups[2].items = append(groups[2].items, check(&u.raggedEdge, "Рваный край", !u.busy && u.overlapPct() > 0))
+		if u.overlapPct() == 0 {
+			groups[2].items = append(groups[2].items, text("Рваный край доступен при перекрытии у шва больше 0%."))
+		} else {
+			groups[2].items = append(groups[2].items, text("Неровная граница смешивания внутри полосы перекрытия. Применяется при следующей склейке."))
+		}
 	}
 	if u.flat.image != nil {
 		groups[2].items = append(groups[2].items, text("Flat: "+u.flat.name))

@@ -287,6 +287,12 @@ func TestFileRoundTrip(t *testing.T) {
 // TestNoDarkRing: a star that is much brighter in one tile (seeing, saturation) must not get a
 // dark halo where the tiles overlap.
 func TestNoDarkRing(t *testing.T) {
+	for _, ragged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ragged=%v", ragged), func(t *testing.T) { testNoDarkRing(t, ragged) })
+	}
+}
+
+func testNoDarkRing(t *testing.T, ragged bool) {
 	shift := Aff{1, 0, 150, 0, 1, 0}
 	starA := [][3]float64{{180, 100, 3}}
 	starB := [][3]float64{{180, 100, 0.5}}
@@ -300,7 +306,7 @@ func TestNoDarkRing(t *testing.T) {
 	}
 	tiles := []*Tile{a, b}
 	W := []Warp{newWarp(identity, 0, a.Img), newWarp(shift, 0, b.Img)}
-	out := render(tiles, W, seamCuts(tiles, W, 0.4))
+	out := render(tiles, W, seamCutsWithRaggedEdge(tiles, W, 0.4, ragged))
 	// mean over a ring 8–18 px from the star vs the background just outside it
 	var ring, bg, nr, nb float64
 	for y := 60; y < 140; y++ {
@@ -357,6 +363,12 @@ func TestMatchBackground(t *testing.T) {
 // TestSeamNoise: two tiles of equal noise; the noise must stay even across the overlap. A wide
 // detail crossfade averaged the two tiles into a quieter strip that a stretch shows as a light band.
 func TestSeamNoise(t *testing.T) {
+	for _, ragged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ragged=%v", ragged), func(t *testing.T) { testSeamNoise(t, ragged) })
+	}
+}
+
+func testSeamNoise(t *testing.T, ragged bool) {
 	shift := Aff{1, 0, 150, 0, 1, 0}
 	a := mkTile(tileW, 200, identity, 0, nil, 1, noBg)
 	b := mkTile(tileW, 200, shift, 0, nil, 1, noBg)
@@ -368,7 +380,7 @@ func TestSeamNoise(t *testing.T) {
 	}
 	tiles := []*Tile{a, b}
 	W := []Warp{newWarp(identity, 0, a.Img), newWarp(shift, 0, b.Img)}
-	out := render(tiles, W, seamCuts(tiles, W, 0.4))
+	out := render(tiles, W, seamCutsWithRaggedEdge(tiles, W, 0.4, ragged))
 	lo, hi := math.Inf(1), 0.0
 	for x := 20; x < out.W-28; x += 8 { // noise of 8-px columns, rows 20..180
 		var s, s2, n float64

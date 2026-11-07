@@ -103,6 +103,7 @@ type ui struct {
 	tasks        chan func()
 
 	overlapSl                   widget.Float // overlap kept round the seams, 0..maxOverlap %
+	raggedEdge                  widget.Bool
 	stitchPending               bool
 	stitchConfirm, stitchCancel widget.Clickable
 	stitchBtn, gridBtn          widget.Clickable
@@ -387,6 +388,9 @@ func (u *ui) handle(gtx layout.Context) {
 	if u.overlapSl.Update(gtx) && !u.busy {
 		u.stitchSettingsChanged()
 	}
+	if u.raggedEdge.Update(gtx) && !u.busy {
+		u.stitchSettingsChanged()
+	}
 	if u.weakBtn.Clicked(gtx) && len(u.weak) > 0 {
 		p := u.weak[0]
 		u.cur, u.view = &p, 1
@@ -620,6 +624,8 @@ func (u *ui) stitch() {
 	chAlign, lfit, bgEq, psfMatch := u.chAlign.Value, u.lfit.Value, u.bgEq.Value, u.psfMatch.Value
 	masterFlat := u.flat.image
 	fieldPSF := u.psfField
+	raggedEdge := u.raggedEdge.Value && ov > 0
+	log.Printf("STITCH tiles=%d overlap=%.0f%% raggedEdge=%v", len(tiles), ov, raggedEdge)
 	go func() {
 		var chNotes []string
 		if masterFlat != nil {
@@ -704,7 +710,10 @@ func (u *ui) stitch() {
 			}
 			notes = append(notes, "фон: "+strings.Join(bn, ", "))
 		}
-		res := render(tiles, W, seamCuts(tiles, W, ov/100))
+		res := render(tiles, W, seamCutsWithRaggedEdge(tiles, W, ov/100, raggedEdge))
+		if raggedEdge {
+			notes = append(notes, "рваный край шва")
+		}
 		pv := previews(res, previewSide)
 		u.post(func() {
 			u.busy = false
