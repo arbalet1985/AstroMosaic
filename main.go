@@ -96,6 +96,8 @@ type selDrag struct {
 }
 
 type ui struct {
+	workspace    workspaceState
+	palette      paletteState
 	sidebarState sidebarState
 	w            *app.Window
 	th           *material.Theme
@@ -239,6 +241,10 @@ func (u *ui) layout(gtx layout.Context) {
 	paint.Fill(gtx.Ops, color.NRGBA{R: 0x20, G: 0x22, B: 0x26, A: 0xff})
 	u.th.Palette.Fg = color.NRGBA{R: 0xe0, G: 0xe0, B: 0xe0, A: 0xff}
 	u.th.Palette.Bg = color.NRGBA{R: 0x20, G: 0x22, B: 0x26, A: 0xff}
+	if u.workspace.section == sectionHome {
+		u.homeView(gtx)
+		return
+	}
 	layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{}.Layout(gtx,
@@ -249,6 +255,9 @@ func (u *ui) layout(gtx layout.Context) {
 				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					view := func(gtx layout.Context) layout.Dimensions {
+						if u.workspace.section == sectionPalettes {
+							return u.paletteView(gtx)
+						}
 						switch u.view {
 						case 1:
 							return u.pointsView(gtx)
@@ -309,6 +318,8 @@ func (u *ui) layout(gtx layout.Context) {
 }
 
 func (u *ui) handle(gtx layout.Context) {
+	u.handleWorkspace(gtx)
+	u.handlePalette(gtx)
 	u.handleRestoration(gtx)
 	u.handleGradient(gtx)
 	u.handleColorHalos(gtx)
@@ -1018,7 +1029,11 @@ func (u *ui) pairPanel(gtx layout.Context, cp cellPair, side int) layout.Dimensi
 
 func (u *ui) resultView(gtx layout.Context) layout.Dimensions {
 	if u.result == nil {
-		return layout.Center.Layout(gtx, material.Body1(u.th, "Нажмите «Склеить»").Layout)
+		message := "Нажмите «Склеить»"
+		if u.workspace.section == sectionEnhance {
+			message = "Откройте изображение или передайте результат мозаики / палитры"
+		}
+		return layout.Center.Layout(gtx, material.Body1(u.th, message).Layout)
 	}
 	pn := &u.resPanel
 	scale := float32(u.result.W) / float32(u.resPrevW)

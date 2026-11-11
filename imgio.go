@@ -284,7 +284,16 @@ func writeFITS(path string, m *Img) error {
 	defer f.Close()
 	w := bufio.NewWriter(f)
 	var hb bytes.Buffer
-	card := func(k, v string) { fmt.Fprintf(&hb, "%-8s= %20s%50s", k, v, "") }
+	card := func(k, v string) {
+		// 20 columns is a minimum width, not a limit. Long WCS numbers
+		// must use some of the trailing space, never lengthen the 80-byte card.
+		if len(v) > 70 {
+			if number, err := strconv.ParseFloat(v, 64); err == nil {
+				v = strconv.FormatFloat(number, 'g', 17, 64)
+			}
+		}
+		fmt.Fprintf(&hb, "%-80s", fmt.Sprintf("%-8s= %20s", k, v))
+	}
 	card("SIMPLE", "T")
 	card("BITPIX", "-32")
 	if m.C == 1 {

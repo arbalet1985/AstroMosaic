@@ -19,6 +19,9 @@ type sidebarState struct {
 }
 
 func (u *ui) sidebar(gtx layout.Context) layout.Dimensions {
+	if u.workspace.section == sectionPalettes {
+		return u.paletteSidebar(gtx)
+	}
 	s := &u.sidebarState
 	if !s.initialized {
 		s.open[0] = u.result == nil
@@ -197,11 +200,25 @@ func (u *ui) sidebar(gtx layout.Context) layout.Dimensions {
 	if u.view >= 5 || u.view == 1 {
 		order = []int{6, 0, 1, 2, 3, 4, 5}
 	}
+	if u.workspace.section == sectionEnhance {
+		groups[0].items = []layout.Widget{button(&u.workspace.openImage, "Открыть изображение…", !u.busy), button(&u.saveBtn, "Сохранить результат…", ready)}
+		order = []int{0, 4, 1, 5, 6}
+		if u.view >= 5 {
+			order = []int{6, 4, 0, 1, 5}
+		}
+	}
 	return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(material.Body1(u.th, "AstroMosaic").Layout),
+			layout.Rigid(button(&u.workspace.home, "← Разделы", !u.busy)),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-			layout.Rigid(button(&u.viewGrid, "Плитки", true)), layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout), layout.Rigid(button(&u.viewRes, "Результат", u.result != nil)),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if u.workspace.section == sectionEnhance {
+					return layout.Dimensions{}
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, layout.Rigid(button(&u.viewGrid, "Плитки", true)), layout.Rigid(button(&u.workspace.enhance, "Результат → Улучшения", ready)))
+			}),
+			layout.Rigid(button(&u.viewRes, "Результат", u.result != nil)),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				if !u.stitchPending {
 					return layout.Dimensions{}
@@ -209,7 +226,7 @@ func (u *ui) sidebar(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, layout.Rigid(text("Пересчёт заменит кадрирование, улучшения и историю. Сохраните результат, если он нужен.")), layout.Rigid(button(&u.stitchConfirm, "Пересчитать из исходников", !u.busy)), layout.Rigid(button(&u.stitchCancel, "Отмена пересчёта", !u.busy)))
 			}),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-				return material.List(u.th, &s.list).Layout(gtx, len(groups), func(gtx layout.Context, position int) layout.Dimensions {
+				return material.List(u.th, &s.list).Layout(gtx, len(order), func(gtx layout.Context, position int) layout.Dimensions {
 					i := order[position]
 					return layout.Inset{Top: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						prefix := "▸ "

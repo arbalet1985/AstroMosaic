@@ -120,6 +120,54 @@ func TestFormats(t *testing.T) {
 	}
 }
 
+func TestFITSLongWCSValuesKeepCardAlignment(t *testing.T) {
+	m := newImg(7, 5, 3)
+	for i := range m.Pix {
+		m.Pix[i] = float32(i-30) / 100
+	}
+	m.Hdr["CDELT1"] = "-0.000382794530057077"
+	m.Hdr["PC2_2"] = "-0.409176484921019123456789"
+	path := filepath.Join(t.TempDir(), "palette.fits")
+	if err := writeFITS(path, m); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundEnd := false
+	for i := 0; i < 2880; i += 80 {
+		card := string(data[i : i+80])
+		if card[:8] == "END     " {
+			foundEnd = true
+			break
+		}
+		if card[8:10] != "= " {
+			t.Fatalf("misaligned FITS card at byte %d: %q", i, card)
+		}
+	}
+	if !foundEnd {
+		t.Fatal("missing aligned END card")
+	}
+	out, err := loadImage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.W != m.W || out.H != m.H || out.C != m.C {
+		t.Fatal("dimensions changed")
+	}
+	for i, v := range m.Pix {
+		if out.Pix[i] != v {
+			t.Fatalf("pixel %d changed: %g != %g", i, out.Pix[i], v)
+		}
+	}
+	for k, v := range m.Hdr {
+		if out.Hdr[k] != v {
+			t.Fatalf("metadata %s changed: %s != %s", k, out.Hdr[k], v)
+		}
+	}
+}
+
 func TestGeometry(t *testing.T) {
 	m := newImg(6, 4, 1)
 	for i := range m.Pix {
