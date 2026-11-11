@@ -12,6 +12,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -275,6 +276,33 @@ func abs(v int) int {
 	return v
 }
 
+// exportImageHeader drops display limits and checksums belonging to the input
+// image, and describes the actual output range without changing its pixels.
+func exportImageHeader(m *Img) map[string]string {
+	h := make(map[string]string, len(m.Hdr)+2)
+	for k, v := range m.Hdr {
+		switch strings.ToUpper(k) {
+		case "MIPS-FLO", "MIPS-FHI", "MIPS-LO", "MIPS-HI", "DATAMIN", "DATAMAX", "CHECKSUM", "DATASUM":
+			continue
+		}
+		h[k] = v
+	}
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for _, p := range m.Pix {
+		v := float64(p)
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		lo = math.Min(lo, v)
+		hi = math.Max(hi, v)
+	}
+	if !math.IsInf(lo, 1) {
+		h["DATAMIN"] = strconv.FormatFloat(lo, 'g', 17, 64)
+		h["DATAMAX"] = strconv.FormatFloat(hi, 'g', 17, 64)
+	}
+	return h
+}
+
 // writeFITS writes 32-bit float, bottom-up (standard orientation).
 func writeFITS(path string, m *Img) error {
 	f, err := os.Create(path)
@@ -306,7 +334,7 @@ func writeFITS(path string, m *Img) error {
 	if m.C > 1 {
 		card("NAXIS3", strconv.Itoa(m.C))
 	}
-	for k, v := range m.Hdr {
+	for k, v := range exportImageHeader(m) {
 		if _, err := strconv.ParseFloat(v, 64); err == nil && len(k) <= 8 && !strings.HasPrefix(k, "NAXIS") &&
 			k != "SIMPLE" && k != "BITPIX" && k != "BZERO" && k != "BSCALE" && k != "ROWORDER" && k != "EXTEND" {
 			card(k, v)
@@ -511,10 +539,11 @@ func writeXISF(path string, m *Img) error {
 		cs = "RGB"
 	}
 	var kw strings.Builder
-	for _, k := range sortedKeys(m.Hdr) {
-		if _, err := strconv.ParseFloat(m.Hdr[k], 64); err == nil && !strings.HasPrefix(k, "NAXIS") &&
+	hdr := exportImageHeader(m)
+	for _, k := range sortedKeys(hdr) {
+		if _, err := strconv.ParseFloat(hdr[k], 64); err == nil && !strings.HasPrefix(k, "NAXIS") &&
 			k != "SIMPLE" && k != "BITPIX" && k != "BZERO" && k != "BSCALE" && k != "ROWORDER" && k != "EXTEND" {
-			fmt.Fprintf(&kw, `<FITSKeyword name="%s" value="%s" comment=""/>`, k, m.Hdr[k])
+			fmt.Fprintf(&kw, `<FITSKeyword name="%s" value="%s" comment=""/>`, k, hdr[k])
 		}
 	}
 	size := 4 * m.W * m.H * m.C
@@ -625,7 +654,15 @@ func writeJPEG(path string, m *Img) error {
 
 // saveImage picks the format by extension; TIFF is 32-bit float when floatTIFF, else 16-bit.
 func saveImage(path string, m *Img, floatTIFF bool) error {
-	switch strings.ToLower(filepath.Ext(path)) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".fit" || ext == ".fits" || ext == ".fts" || ext == ".xisf" || (floatTIFF && (ext == ".tif" || ext == ".tiff")) {
+		var shift float32
+		m, shift = paletteExportImage(m)
+		if shift > 0 {
+			log.Printf("EXPORT: общий сдвиг RGB +%.9g для совместимости просмотра; сигнал не обрезан; path=%q", shift, path)
+		}
+	}
+	switch ext {
 	case ".fit", ".fits", ".fts":
 		return writeFITS(path, m)
 	case ".xisf":

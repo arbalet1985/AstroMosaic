@@ -33,9 +33,12 @@ type paletteState struct {
 	oxygenHue                       widget.Float
 	showAdvanced                    bool
 	protectSulfur, protectOxygen    widget.Bool
+	protectForaxx                   widget.Bool
+	suppressGrid                    widget.Bool
+	gridNote                        string
 	maskView                        int
 	maskButton                      widget.Clickable
-	maskImages                      [2]paint.ImageOp
+	maskImages                      [3]paint.ImageOp
 	lockStretch                     widget.Bool
 	tones                           [nPrev]displayTone
 	prepared                        *palettePrepared
@@ -66,6 +69,8 @@ func (p *paletteState) defaults() {
 	p.oxygenHue.Value = 0
 	p.autoWeights.Value = true
 	p.protectSulfur.Value, p.protectOxygen.Value = true, true
+	p.protectForaxx.Value = true
+	p.suppressGrid.Value = false
 	p.lockStretch.Value = true
 	if p.prepared != nil {
 		b1, b2, so := p.prepared.autoFractions()
@@ -74,7 +79,7 @@ func (p *paletteState) defaults() {
 }
 
 func (p *paletteState) settings() paletteParams {
-	return paletteParams{Mode: p.mode, Hydrogen: p.strengthValue(0), Oxygen: p.strengthValue(1), Sulfur: p.strengthValue(2), Hue: float64(p.hue.Value), OxygenHue: float64(p.oxygenHue.Value), Auto: p.autoWeights.Value, BlueHO: float64(p.blueHO.Value), BlueSO: float64(p.blueSO.Value), SourceSO: float64(p.sourceSO.Value), ProtectSulfur: p.protectSulfur.Value, ProtectOxygen: p.protectOxygen.Value}
+	return paletteParams{Mode: p.mode, Hydrogen: p.strengthValue(0), Oxygen: p.strengthValue(1), Sulfur: p.strengthValue(2), Hue: float64(p.hue.Value), OxygenHue: float64(p.oxygenHue.Value), Auto: p.autoWeights.Value, BlueHO: float64(p.blueHO.Value), BlueSO: float64(p.blueSO.Value), SourceSO: float64(p.sourceSO.Value), ProtectSulfur: p.protectSulfur.Value, ProtectOxygen: p.protectOxygen.Value, ProtectForaxx: p.protectForaxx.Value, SuppressGrid: p.suppressGrid.Value}
 }
 
 func (p *paletteState) strengthValue(i int) float64 {
@@ -120,17 +125,27 @@ func (u *ui) handlePalette(gtx layout.Context) {
 		p.showAdvanced = !p.showAdvanced
 	}
 	changed := false
+	if p.suppressGrid.Update(gtx) {
+		changed = true
+	}
 	if p.lockStretch.Update(gtx) {
 		changed = true
 	}
 	if p.maskButton.Clicked(gtx) {
-		p.maskView = (p.maskView + 1) % 3
+		count := 3
+		if p.mode >= 8 {
+			count = 4
+		}
+		p.maskView = (p.maskView + 1) % count
 		p.panel.needFit = true
 	}
 	if p.protectSulfur.Update(gtx) {
 		changed = true
 	}
 	if p.protectOxygen.Update(gtx) {
+		changed = true
+	}
+	if p.protectForaxx.Update(gtx) {
 		changed = true
 	}
 	if p.reset.Clicked(gtx) && !u.busy {
@@ -186,6 +201,7 @@ func (u *ui) handlePalette(gtx layout.Context) {
 		}
 	}
 	if changed {
+		p.chooser.stage = 0
 		p.dirty = true
 		p.revision++
 	}
@@ -193,10 +209,18 @@ func (u *ui) handlePalette(gtx layout.Context) {
 		u.preparePaletteInputs()
 	}
 	if p.apply.Clicked(gtx) && !u.busy && p.prepared != nil && p.validStrengths() {
-		u.applyPalette()
+		if p.suppressGrid.Value && len(p.prepared.GridHydrogen) == 0 {
+			u.preparePaletteGrid()
+		} else {
+			u.applyPalette()
+		}
 	}
 	if p.dirty && !p.previewBusy && p.prepared != nil && !u.busy && u.workspace.section == sectionPalettes {
-		u.previewPalette()
+		if p.suppressGrid.Value && len(p.prepared.GridHydrogen) == 0 {
+			u.preparePaletteGrid()
+		} else {
+			u.previewPalette()
+		}
 	}
 }
 
@@ -224,6 +248,7 @@ func (u *ui) openPaletteInput(index int) {
 			p := &u.palette
 			p.inputs[index], p.names[index] = m, filepath.Base(path)
 			p.prepared = nil
+			p.gridNote = ""
 			p.chooser.stage = 0
 			p.images = [nPrev]paint.ImageOp{}
 			p.hasPreview = false
@@ -240,6 +265,7 @@ func (u *ui) openPaletteInput(index int) {
 func (u *ui) preparePaletteInputs() {
 	p := &u.palette
 	ho, so, auto, center := p.inputs[0], p.inputs[1], p.autoAlign.Value, p.center.Value
+	grid := p.suppressGrid.Value
 	u.busy = true
 	p.revision++
 	p.prepared = nil
@@ -248,11 +274,16 @@ func (u *ui) preparePaletteInputs() {
 	u.status = "Совмещение, общая область и оценка шума G/B…"
 	go func() {
 		prepared, err := preparePalette(ho, so, auto, center)
-		var masks [2]paint.ImageOp
+		gridNote := ""
+		if err == nil && grid {
+			prepared.GridHydrogen, prepared.Thumbnail.GridHydrogen, gridNote = paletteGridPlanes(prepared)
+		}
+		var masks [3]paint.ImageOp
 		var tones [nPrev]displayTone
 		if err == nil {
 			masks[0] = paint.NewImageOp(preview(prepared.maskImage(false), 1200, prevLinear))
 			masks[1] = paint.NewImageOp(preview(prepared.maskImage(true), 1200, prevLinear))
+			masks[2] = paint.NewImageOp(preview(prepared.foraxxMaskImage(), 1200, prevLinear))
 			tones = imageTones(prepared.compose(paletteParams{Hydrogen: 1, Oxygen: 1, Auto: true, ProtectOxygen: true}, 1200))
 		}
 		u.post(func() {
@@ -263,6 +294,7 @@ func (u *ui) preparePaletteInputs() {
 				return
 			}
 			p.prepared = prepared
+			p.gridNote = gridNote
 			p.maskImages = masks
 			p.tones = tones
 			p.maskView = 0
@@ -348,7 +380,7 @@ func (u *ui) paletteView(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			label := "Предпросмотр · " + paletteName(p.mode) + " · растяжение только для просмотра"
 			if p.maskView > 0 {
-				label = []string{"", "Маска серы · белое: добавлять SII · чёрное: сохранить HOO", "Маска кислорода · белое: смешивать и усиливать · чёрное: кислород HO"}[p.maskView]
+				label = []string{"", "Маска серы · белое: добавлять SII · чёрное: сохранить HOO", "Маска кислорода · белое: смешивать и усиливать · чёрное: кислород HO", "Итоговая маска Foraxx · белое: Foraxx · чёрное: базовый HOO"}[p.maskView]
 			}
 			if p.previewBusy || p.dirty {
 				label = "Обновляю предпросмотр…"
@@ -394,7 +426,7 @@ func (u *ui) paletteSidebar(gtx layout.Context) layout.Dimensions {
 		}
 	}
 	ready := p.prepared != nil && !u.busy
-	items := []layout.Widget{button(&u.workspace.home, "← Разделы", !u.busy), material.H6(u.th, "Палитры · "+paletteName(p.mode)).Layout, text("HO: SV220 3 nm · SO: Askar 5 nm"), button(&p.open[0], "Открыть HO…", !u.busy)}
+	items := []layout.Widget{button(&u.workspace.home, "← Разделы", !u.busy), material.H6(u.th, "Палитры · "+paletteName(p.mode)).Layout, button(&p.open[0], "Открыть HO…", !u.busy)}
 	for i := 0; i < 2; i++ {
 		if i == 1 {
 			items = append(items, button(&p.open[1], "Открыть SO…", !u.busy))
@@ -414,6 +446,10 @@ func (u *ui) paletteSidebar(gtx layout.Context) layout.Dimensions {
 	}
 	if p.note != "" {
 		items = append(items, text(p.note))
+	}
+	items = append(items, check(&p.suppressGrid, "Ослабить сетку 4×4 в HO", ready), text("Для периодического узора в водороде. Коррекция отключаемая; проверьте звёзды и детали при 100%."))
+	if p.suppressGrid.Value && p.gridNote != "" {
+		items = append(items, text(p.gridNote))
 	}
 	params := p.settings()
 	for i, item := range []struct {
@@ -445,12 +481,17 @@ func (u *ui) paletteSidebar(gtx layout.Context) layout.Dimensions {
 			items = append(items, text("Введите число от 0 до 3; точка или запятая."))
 		}
 	}
+	maskLabels := []string{"Просмотр: результат → маска серы", "Просмотр: маска серы → маска кислорода", "Просмотр: маска кислорода → результат"}
+	if p.mode >= 8 {
+		items = append(items, check(&p.protectForaxx, "Foraxx: итоговая маска защиты фона", ready), text("Чёрное — базовый HOO из HO; белое — готовый Foraxx; серое — плавное смешивание. Маска может исключать самое слабое излучение."))
+		maskLabels = []string{"Просмотр: результат → маска серы", "Просмотр: маска серы → маска кислорода", "Просмотр: маска кислорода → итоговая Foraxx", "Просмотр: итоговая Foraxx → результат"}
+	}
 	items = append(items, text("Оттенок серы: оранжевый → жёлтый"), slider(&p.hue, ready && p.mode == 0),
 		text(fmt.Sprintf("Оттенок кислорода: голубой → синий · %.0f%%", 100*p.oxygenHue.Value)), slider(&p.oxygenHue, ready && (p.mode == 0 || p.mode == 1 || p.mode == 4 || p.mode == 7 || p.mode >= 8)),
 		check(&p.protectSulfur, "Сера: добавлять по маске", ready),
 		check(&p.protectOxygen, "Кислород: смешивать и усиливать по маске", ready),
 		text("Вне маски кислорода сохраняется OIII из HO без усиления. Самые слабые сигналы маска может исключать."),
-		button(&p.maskButton, []string{"Просмотр: результат → маска серы", "Просмотр: маска серы → маска кислорода", "Просмотр: маска кислорода → результат"}[p.maskView], ready),
+		button(&p.maskButton, maskLabels[p.maskView], ready),
 		check(&u.stretch, "Авторастяжение", true), check(&u.link, "Связать каналы", true), text("Для оценки цвета используйте связанные каналы. Предпросмотр усреднён; шум проверяйте в полном разрешении при одинаковом растяжении."))
 	items = append(items, check(&p.lockStretch, "Фиксировать растяжение HOO", ready), text("Фиксация позволяет сравнивать фон при изменении смешивания без автоматической смены контраста."))
 	if p.prepared != nil {

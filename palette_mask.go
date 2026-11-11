@@ -77,6 +77,24 @@ func (p *palettePrepared) buildMasks() {
 			p.OxygenMask = mask
 		}
 	}
+	// Union of independently detected emission, with an additional feather.
+	// Use pre-gain masks so increasing artistic strength cannot expose more noise.
+	union := make([]float32, w*h)
+	for i := range union {
+		a, b := p.SulfurMask[i], p.OxygenMask[i]
+		union[i] = 1 - (1-a)*(1-b)
+	}
+	p.ForaxxMask = waveSmooth(union, w, h, 2, nil)
+}
+
+func (p *palettePrepared) foraxxMaskImage() *Img {
+	small := p
+	if p.Thumbnail != nil {
+		small = p.Thumbnail
+	}
+	m := newImg(small.Region.Dx(), small.Region.Dy(), 1)
+	copy(m.Pix, small.ForaxxMask)
+	return m
 }
 
 func (p *palettePrepared) maskImage(oxygen bool) *Img {

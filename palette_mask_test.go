@@ -130,7 +130,7 @@ func TestPaletteRealMaskedHOAndSO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for j, mask := range [][]float32{p.SulfurMask, p.OxygenMask} {
+	for j, mask := range [][]float32{p.SulfurMask, p.OxygenMask, p.ForaxxMask} {
 		var total float64
 		var zero, one int
 		for _, v := range mask {

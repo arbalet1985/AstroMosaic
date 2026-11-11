@@ -93,6 +93,9 @@ func (u *ui) sidebar(gtx layout.Context) layout.Dimensions {
 		{"Кадрирование и геометрия", nil},
 		{"Текущий инструмент", nil},
 	}
+	if u.view == 2 {
+		groups[1].items = groups[1].items[:3]
+	} // fit/100% are visible above the result
 	if loaded != 1 {
 		groups[2].items = append(groups[2].items, check(&u.lfit, "LinearFit", !u.busy), check(&u.bgEq, "Фон по перекрытию", !u.busy), text(fmt.Sprintf("Перекрытие у шва: %.0f%%", u.overlapPct())), func(gtx layout.Context) layout.Dimensions {
 			if u.busy {

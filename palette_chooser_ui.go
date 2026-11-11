@@ -66,6 +66,10 @@ func (u *ui) generatePaletteChoices(stage int) {
 	if prepared == nil {
 		return
 	}
+	if base.SuppressGrid && len(prepared.GridHydrogen) == 0 {
+		u.preparePaletteGrid()
+		return
+	}
 	c.stage, c.loading = stage, true
 	c.list = widget.List{}
 	u.busy = true

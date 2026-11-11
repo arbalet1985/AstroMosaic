@@ -17,6 +17,8 @@ type paletteParams struct {
 	Auto                          bool
 	BlueHO, BlueSO, SourceSO      float64
 	ProtectSulfur, ProtectOxygen  bool
+	ProtectForaxx                 bool
+	SuppressGrid                  bool
 }
 
 type paletteCalibration struct {
@@ -32,10 +34,12 @@ type palettePrepared struct {
 	Note                     string
 	Thumbnail                *palettePrepared
 	SulfurMask, OxygenMask   []float32 // ROI coordinates, independent of artistic gains
+	ForaxxMask               []float32 // final HOO-to-Foraxx blend, independent of source masks' switches
 	MaskedSulfur             []float32 // thumbnail: average of signal*mask, not mean(signal)*mean(mask)
 	MaskedO                  [4][]float32
 	DynamicTone              [2]paletteFactorTone
 	PresetBalance            [3]float64 // H, O, S gains estimated from diffuse signal
+	GridHydrogen             []float32  // optional corrected HO/R, in ROI coordinates
 }
 
 func paletteFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
@@ -307,6 +311,7 @@ func (p *palettePrepared) thumbnail(maxSide int) *palettePrepared {
 	small.Region = image.Rect(0, 0, w, h)
 	images := [2]*Img{newImg(w, h, 3), newImg(w, h, 3)}
 	small.SulfurMask, small.OxygenMask = make([]float32, w*h), make([]float32, w*h)
+	small.ForaxxMask = make([]float32, w*h)
 	small.MaskedSulfur = make([]float32, w*h)
 	for i := range small.MaskedO {
 		small.MaskedO[i] = make([]float32, w*h)
@@ -317,7 +322,7 @@ func (p *palettePrepared) thumbnail(maxSide int) *palettePrepared {
 			for y := lo; y < hi; y++ {
 				for x := 0; x < w; x++ {
 					var sum [3]float64
-					var maskSum [2]float64
+					var maskSum [3]float64
 					var maskedSulfur float64
 					var maskedO [2]float64
 					var count float64
@@ -330,6 +335,7 @@ func (p *palettePrepared) thumbnail(maxSide int) *palettePrepared {
 							sm, om := float64(p.SulfurMask[mi]), float64(p.OxygenMask[mi])
 							maskSum[0] += sm
 							maskSum[1] += om
+							maskSum[2] += float64(p.ForaxxMask[mi])
 							if k == 1 {
 								maskedSulfur += (float64(src.at(0, sx, sy)) - p.SBackground) * sm
 							}
@@ -352,12 +358,16 @@ func (p *palettePrepared) thumbnail(maxSide int) *palettePrepared {
 					if k == 0 {
 						small.SulfurMask[y*w+x] = float32(maskSum[0] / count)
 						small.OxygenMask[y*w+x] = float32(maskSum[1] / count)
+						small.ForaxxMask[y*w+x] = float32(maskSum[2] / count)
 					}
 				}
 			}
 		})
 	}
 	small.HO, small.SO = images[0], images[1]
+	if len(p.GridHydrogen) > 0 {
+		small.GridHydrogen = paletteGridAverage(p.GridHydrogen, r.Dx(), r.Dy(), w, h)
+	}
 	return &small
 }
 
@@ -429,11 +439,18 @@ func (p *palettePrepared) compose(s paletteParams, maxSide int) *Img {
 	parallel(h, func(lo, hi int) {
 		for y := lo; y < hi; y++ {
 			for x := 0; x < w; x++ {
-				var hydrogen, sulfur, oxygen, oxygenGreen, count float64
+				var hydrogen, sulfur, oxygen, oxygenGreen, baselineOxygen, foraxxMask, count float64
 				for sy := r.Min.Y + y*stride; sy < min(r.Min.Y+(y+1)*stride, r.Max.Y); sy++ {
 					for sx := r.Min.X + x*stride; sx < min(r.Min.X+(x+1)*stride, r.Max.X); sx++ {
-						hydrogen += float64(p.HO.at(0, sx, sy)) - p.HBackground
 						mi := (sy-r.Min.Y)*r.Dx() + sx - r.Min.X
+						h := float64(p.HO.at(0, sx, sy))
+						if s.SuppressGrid && len(p.GridHydrogen) > 0 {
+							h = float64(p.GridHydrogen[mi])
+						}
+						hydrogen += h - p.HBackground
+						if len(p.ForaxxMask) > 0 {
+							foraxxMask += float64(p.ForaxxMask[mi])
+						}
 						ss := float64(p.SO.at(0, sx, sy)) - p.SBackground
 						if s.ProtectSulfur && len(p.SulfurMask) > 0 {
 							if p.MaskedSulfur != nil {
@@ -445,6 +462,7 @@ func (p *palettePrepared) compose(s paletteParams, maxSide int) *Img {
 						sulfur += ss
 						for i, src := range [4]*Img{p.HO, p.HO, p.SO, p.SO} {
 							o := p.O[i].Offset + p.O[i].Gain*float64(src.at(1+i%2, sx, sy))
+							baselineOxygen += baseWeights[i] * o
 							if s.ProtectOxygen && len(p.OxygenMask) > 0 {
 								masked := o * float64(p.OxygenMask[mi])
 								if p.MaskedO[i] != nil {
@@ -466,6 +484,13 @@ func (p *palettePrepared) compose(s paletteParams, maxSide int) *Img {
 				oxygenGreen /= count
 				i := y*w + x
 				rgb := p.mapPalette(s, hydrogen, oxygen, oxygenGreen, sulfur)
+				if s.ProtectForaxx && (s.Mode == 8 || s.Mode == 9) && len(p.ForaxxMask) > 0 {
+					base := [3]float64{hydrogen, baselineOxygen / count, baselineOxygen / count}
+					mask := math.Max(0, math.Min(1, foraxxMask/count))
+					for c := range rgb {
+						rgb[c] = base[c] + mask*(rgb[c]-base[c])
+					}
+				}
 				out.Pix[i], out.Pix[w*h+i], out.Pix[2*w*h+i] = float32(rgb[0]), float32(rgb[1]), float32(rgb[2])
 			}
 		}
@@ -478,6 +503,7 @@ func (p *palettePrepared) compose(s paletteParams, maxSide int) *Img {
 	}
 	delete(out.Hdr, "BAYERPAT")
 	delete(out.Hdr, "WBPPCROP")
+	delete(out.Hdr, "AMSHIFT") // an input export offset does not describe this new mix
 	out.Hdr["FILTER"] = "HOO+SII"
 	if s.Mode > 0 {
 		out.Hdr["FILTER"] = paletteName(s.Mode)
@@ -498,6 +524,7 @@ func (p *palettePrepared) compose(s paletteParams, maxSide int) *Img {
 	} else { // The preview is display-only; its original WCS would be misleading.
 		out.Hdr = map[string]string{}
 	}
-	out.Operations = []string{fmt.Sprintf("HO+SO → %s: H=%.3f O=%.3f S=%.3f sulfurHue=%.3f oxygenHue=%.3f; masks S=%v O=%v; OIII weights HO G/B=%.4f/%.4f SO G/B=%.4f/%.4f; %s", paletteName(s.Mode), s.Hydrogen, s.Oxygen, s.Sulfur, s.Hue, s.OxygenHue, s.ProtectSulfur, s.ProtectOxygen, weights[0], weights[1], weights[2], weights[3], p.Note)}
+	out.Operations = []string{fmt.Sprintf("HO+SO → %s: H=%.3f O=%.3f S=%.3f sulfurHue=%.3f oxygenHue=%.3f; masks S=%v O=%v finalForaxx=%v grid4=%v; OIII weights HO G/B=%.4f/%.4f SO G/B=%.4f/%.4f; %s", paletteName(s.Mode), s.Hydrogen, s.Oxygen, s.Sulfur, s.Hue, s.OxygenHue, s.ProtectSulfur, s.ProtectOxygen, s.ProtectForaxx, s.SuppressGrid, weights[0], weights[1], weights[2], weights[3], p.Note)}
+	out.Hdr["AMPALET"] = "1"
 	return out
 }

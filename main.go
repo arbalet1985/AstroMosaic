@@ -1029,6 +1029,33 @@ func (u *ui) pairPanel(gtx layout.Context, cp cellPair, side int) layout.Dimensi
 
 func (u *ui) resultView(gtx layout.Context) layout.Dimensions {
 	if u.result == nil {
+		return u.resultImageView(gtx)
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				scale := 100 * float64(u.resPanel.zoom) * float64(u.resPrevW) / float64(u.result.W)
+				label := "100%"
+				wide := gtx.Constraints.Max.X >= gtx.Dp(600)
+				if wide {
+					label = "100% — исходные пиксели"
+				}
+				children := []layout.FlexChild{
+					layout.Rigid(material.Button(u.th, &u.comparison.fit, "Вписать").Layout),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(material.Button(u.th, &u.comparison.native, label).Layout),
+				}
+				if wide {
+					children = append(children, layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout), layout.Rigid(material.Body2(u.th, fmt.Sprintf("%.0f%% · %d×%d", scale, u.result.W, u.result.H)).Layout))
+				}
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx, children...)
+			})
+		}),
+		layout.Flexed(1, u.resultImageView))
+}
+
+func (u *ui) resultImageView(gtx layout.Context) layout.Dimensions {
+	if u.result == nil {
 		message := "Нажмите «Склеить»"
 		if u.workspace.section == sectionEnhance {
 			message = "Откройте изображение или передайте результат мозаики / палитры"
@@ -1155,7 +1182,11 @@ func (u *ui) paintPanelImage(gtx layout.Context, pn *panel, img paint.ImageOp) {
 	}
 	st := op.Affine(f32.Affine2D{}.Scale(f32.Point{}, f32.Pt(pn.zoom, pn.zoom)).Offset(pn.pan)).Push(gtx.Ops)
 	img.Filter = paint.FilterLinear
-	if pn.zoom >= 1 {
+	nativeScale := pn.zoom
+	if pn.nativeSize.X > 0 {
+		nativeScale *= float32(isz.X) / float32(pn.nativeSize.X)
+	}
+	if nativeScale >= 1 {
 		img.Filter = paint.FilterNearest
 	}
 	img.Add(gtx.Ops)

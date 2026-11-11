@@ -74,6 +74,12 @@ func TestPaletteRenderIC443(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, s := range configs {
+		if s.SuppressGrid {
+			p.GridHydrogen, p.Thumbnail.GridHydrogen, _ = paletteGridPlanes(p)
+			break
+		}
+	}
 	if err := os.MkdirAll(dest, 0700); err != nil {
 		t.Fatal(err)
 	}
